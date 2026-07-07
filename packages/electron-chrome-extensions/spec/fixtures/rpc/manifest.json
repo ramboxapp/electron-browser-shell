@@ -17,7 +17,11 @@
   },
   "manifest_version": 2,
   "permissions": [
+    "alarms",
     "contextMenus",
+    "downloads",
+    "idle",
+    "management",
     "nativeMessaging",
     "webRequest",
     "webRequestBlocking",

@@ -1,4 +1,4 @@
-name: Publish electron-chrome-extensions
+name: Publish electron-chrome-extensions package
 
 on:
   workflow_dispatch:

@@ -4,13 +4,18 @@ import path from 'node:path'
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
+import { AlarmsAPI } from './api/alarms'
 import { BrowserActionAPI } from './api/browser-action'
 import { TabsAPI } from './api/tabs'
 import { WindowsAPI } from './api/windows'
 import { WebNavigationAPI } from './api/web-navigation'
 import { ExtensionStore } from './store'
 import { ContextMenusAPI } from './api/context-menus'
+import { DownloadsAPI } from './api/downloads'
 import { IdentityAPI } from './api/identity'
+import { IdleAPI } from './api/idle'
+import { ManagementAPI } from './api/management'
+import { OffscreenAPI } from './api/offscreen'
 import { RuntimeAPI } from './api/runtime'
 import { CookiesAPI } from './api/cookies'
 import { NotificationsAPI } from './api/notifications'
@@ -122,12 +127,17 @@ export class ElectronChromeExtensions extends EventEmitter {
   private ctx: ExtensionContext
 
   private api: {
+    alarms: AlarmsAPI
     browserAction: BrowserActionAPI
     contextMenus: ContextMenusAPI
     commands: CommandsAPI
     cookies: CookiesAPI
+    downloads: DownloadsAPI
     identity: IdentityAPI
+    idle: IdleAPI
+    management: ManagementAPI
     notifications: NotificationsAPI
+    offscreen: OffscreenAPI
     permissions: PermissionsAPI
     runtime: RuntimeAPI
     tabs: TabsAPI
@@ -160,12 +170,17 @@ export class ElectronChromeExtensions extends EventEmitter {
     }
 
     this.api = {
+      alarms: new AlarmsAPI(this.ctx),
       browserAction: new BrowserActionAPI(this.ctx),
       contextMenus: new ContextMenusAPI(this.ctx),
       commands: new CommandsAPI(this.ctx),
       cookies: new CookiesAPI(this.ctx),
+      downloads: new DownloadsAPI(this.ctx),
       identity: new IdentityAPI(this.ctx),
+      idle: new IdleAPI(this.ctx),
+      management: new ManagementAPI(this.ctx),
       notifications: new NotificationsAPI(this.ctx),
+      offscreen: new OffscreenAPI(this.ctx),
       permissions: new PermissionsAPI(this.ctx),
       runtime: new RuntimeAPI(this.ctx),
       tabs: new TabsAPI(this.ctx),

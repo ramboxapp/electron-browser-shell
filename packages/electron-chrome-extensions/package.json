@@ -28,7 +28,7 @@
     "clean": "node ../../scripts/clean.js",
     "prepublishOnly": "cross-env NODE_ENV=production yarn build",
     "pretest": "esbuild spec/fixtures/crx-test-preload.ts --bundle --external:electron --outfile=spec/fixtures/crx-test-preload.js --platform=node",
-    "test": "node ./script/spec-runner.js"
+    "test": "yarn run pretest && node ./script/spec-runner.js"
   },
   "keywords": [
     "electron",

@@ -45,6 +45,18 @@ export const useServer = () => {
 
 const fixtures = path.join(__dirname, 'fixtures')
 
+// Set SPEC_LOG_CONSOLE=1 to relay console output from background pages and
+// renderers to the test output. Useful for debugging failing specs.
+if (process.env.SPEC_LOG_CONSOLE) {
+  app.on('web-contents-created', (_event, wc) => {
+    if (wc.getType() === 'backgroundPage') {
+      wc.on('console-message' as any, (_e: any, _level: any, message: any) => {
+        console.log(`[background]`, typeof message === 'string' ? message : JSON.stringify(message))
+      })
+    }
+  })
+}
+
 export const useExtensionBrowser = (opts: {
   url?: () => string
   file?: string
@@ -86,6 +98,12 @@ export const useExtensionBrowser = (opts: {
       show: false,
       webPreferences: { session: customSession, nodeIntegration: false, contextIsolation: true },
     })
+
+    if (process.env.SPEC_LOG_CONSOLE) {
+      w.webContents.on('console-message' as any, (_e: any, level: any, message: any) => {
+        console.log(`[renderer]`, typeof message === 'string' ? message : JSON.stringify(message))
+      })
+    }
 
     if (opts.openDevTools) {
       w.webContents.openDevTools({ mode: 'detach' })

@@ -76,6 +76,25 @@ describe('chrome.contextMenus', () => {
     })
   })
 
+  describe('update()', () => {
+    it('updates item properties', async () => {
+      const id = uuid()
+      await browser.crx.exec('contextMenus.create', { id, title: 'before' })
+      await browser.crx.exec('contextMenus.update', id, { title: 'after' })
+      const items = await getContextMenuItems()
+      expect(items).to.have.lengthOf(1)
+      expect(items[0].label).to.equal('after')
+    })
+
+    it('hides item when visible is set to false', async () => {
+      const id = uuid()
+      await browser.crx.exec('contextMenus.create', { id, title: 'visible' })
+      await browser.crx.exec('contextMenus.update', id, { visible: false })
+      const items = await getContextMenuItems()
+      expect(items).to.be.empty
+    })
+  })
+
   describe('remove()', () => {
     it('removes item', async () => {
       const id = uuid()

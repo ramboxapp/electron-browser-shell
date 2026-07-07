@@ -33,6 +33,7 @@ export class TabsAPI {
     handle('tabs.getAllInWindow', this.getAllInWindow.bind(this))
     handle('tabs.getCurrent', this.getCurrent.bind(this))
     handle('tabs.create', this.create.bind(this))
+    handle('tabs.captureVisibleTab', this.captureVisibleTab.bind(this))
     handle('tabs.insertCSS', this.insertCSS.bind(this))
     handle('tabs.query', this.query.bind(this))
     handle('tabs.reload', this.reload.bind(this))
@@ -174,6 +175,33 @@ export class TabsAPI {
       queueMicrotask(() => this.onActivated(tab.id))
     }
     return tabDetails
+  }
+
+  private async captureVisibleTab(event: ExtensionEvent, arg1?: unknown, arg2?: unknown) {
+    // The signature is overloaded: captureVisibleTab(windowId?, options?).
+    const windowId: number =
+      typeof arg1 === 'number' ? arg1 : TabsAPI.WINDOW_ID_CURRENT
+    const options: chrome.tabs.CaptureVisibleTabOptions =
+      (typeof arg1 === 'object' ? arg1 : typeof arg2 === 'object' ? arg2 : {}) || {}
+
+    const win =
+      windowId === TabsAPI.WINDOW_ID_CURRENT
+        ? this.ctx.store.getCurrentWindow()
+        : this.ctx.store.getWindowById(windowId)
+    if (!win) throw new Error(`No window with id: ${windowId}`)
+
+    const tab = this.ctx.store.getActiveTabFromWindow(win)
+    if (!tab) throw new Error('No active tab in window')
+
+    const image = await tab.capturePage()
+
+    if (options.format === 'png') {
+      return image.toDataURL()
+    } else {
+      // Chrome defaults to JPEG at quality 92.
+      const quality = typeof options.quality === 'number' ? options.quality : 92
+      return `data:image/jpeg;base64,${image.toJPEG(quality).toString('base64')}`
+    }
   }
 
   private insertCSS(event: ExtensionEvent, tabId: number, details: chrome.tabs.InjectDetails) {

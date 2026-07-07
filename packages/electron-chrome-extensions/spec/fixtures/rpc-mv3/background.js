@@ -48,8 +48,6 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
             if (value !== undefined) reply(value)
           })
         }
-      } else {
-        console.error(`missing method: ${method} (typeof ${apiName}=${typeof chrome[apiName]})`)
       }
 
       break

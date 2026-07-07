@@ -86,6 +86,7 @@ export class ContextMenusAPI {
   constructor(private ctx: ExtensionContext) {
     const handle = this.ctx.router.apiHandler()
     handle('contextMenus.create', this.create)
+    handle('contextMenus.update', this.update)
     handle('contextMenus.remove', this.remove)
     handle('contextMenus.removeAll', this.removeAll)
 
@@ -298,6 +299,22 @@ export class ContextMenusAPI {
     }
 
     this.addContextItem(extension.id, createProperties)
+  }
+
+  // Merges updates into the stored item; menus are rebuilt from the stored
+  // props the next time they're shown.
+  private update = (
+    { extension }: ExtensionEvent,
+    menuItemId: string | number,
+    updateProperties: Partial<ContextItemProps>,
+  ) => {
+    const items = this.menus.get(extension.id)
+    const props = items?.get(`${menuItemId}`)
+    if (!props) return
+
+    // The item ID can't be changed by an update
+    const { id: _ignored, ...updates } = updateProperties
+    items!.set(`${menuItemId}`, { ...props, ...updates })
   }
 
   private remove = ({ extension }: ExtensionEvent, menuItemId: string) => {

@@ -122,6 +122,21 @@ export const injectExtensionAPIs = () => {
       return canvas.toDataURL()
     }
 
+    /**
+     * Renderer-only method which resolves with a static result. Used to stub
+     * APIs that have no browser-side implementation, while still supporting
+     * both callback and Promise call styles.
+     */
+    const localStub =
+      (result?: any) =>
+      (...args: any[]) => {
+        const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+        if (callback) {
+          queueMicrotask(() => callback(result))
+        }
+        return Promise.resolve(result)
+      }
+
     class ExtensionEvent<T extends Function> implements chrome.events.Event<T> {
       constructor(private name: string) {}
 
@@ -307,6 +322,20 @@ export const injectExtensionAPIs = () => {
         factory: browserActionFactory,
       },
 
+      alarms: {
+        factory: (base) => {
+          return {
+            ...base,
+            create: invokeExtension('alarms.create'),
+            get: invokeExtension('alarms.get'),
+            getAll: invokeExtension('alarms.getAll'),
+            clear: invokeExtension('alarms.clear'),
+            clearAll: invokeExtension('alarms.clearAll'),
+            onAlarm: new ExtensionEvent('alarms.onAlarm'),
+          }
+        },
+      },
+
       browserAction: {
         shouldInject: () => manifest.manifest_version === 2 && !!manifest.browser_action,
         factory: browserActionFactory,
@@ -339,6 +368,8 @@ export const injectExtensionAPIs = () => {
             hasInternalListener = true
           }
 
+          const menuUpdate = invokeExtension('contextMenus.update')
+
           const api = {
             ...base,
             create: function (
@@ -356,7 +387,20 @@ export const injectExtensionAPIs = () => {
               menuCreate(createProperties, callback)
               return createProperties.id
             },
-            update: invokeExtension('contextMenus.update', { noop: true }),
+            update: function (
+              id: string | number,
+              updateProperties: chrome.contextMenus.CreateProperties,
+              callback?: Function,
+            ) {
+              // Like create(), onclick handlers can't cross the IPC boundary
+              // so they're kept in the renderer and dispatched via onClicked.
+              if (updateProperties.onclick) {
+                if (!hasInternalListener) addInternalListener()
+                menuCallbacks[id] = updateProperties.onclick
+                delete updateProperties.onclick
+              }
+              return menuUpdate(id, updateProperties, callback)
+            },
             remove: invokeExtension('contextMenus.remove'),
             removeAll: invokeExtension('contextMenus.removeAll'),
             onClicked: new ExtensionEvent<
@@ -382,24 +426,23 @@ export const injectExtensionAPIs = () => {
         },
       },
 
-      // TODO: implement
       downloads: {
         factory: (base) => {
           return {
             ...base,
             acceptDanger: invokeExtension('downloads.acceptDanger', { noop: true }),
-            cancel: invokeExtension('downloads.cancel', { noop: true }),
-            download: invokeExtension('downloads.download', { noop: true }),
-            erase: invokeExtension('downloads.erase', { noop: true }),
+            cancel: invokeExtension('downloads.cancel'),
+            download: invokeExtension('downloads.download'),
+            erase: invokeExtension('downloads.erase'),
             getFileIcon: invokeExtension('downloads.getFileIcon', { noop: true }),
-            open: invokeExtension('downloads.open', { noop: true }),
-            pause: invokeExtension('downloads.pause', { noop: true }),
+            open: invokeExtension('downloads.open'),
+            pause: invokeExtension('downloads.pause'),
             removeFile: invokeExtension('downloads.removeFile', { noop: true }),
-            resume: invokeExtension('downloads.resume', { noop: true }),
-            search: invokeExtension('downloads.search', { noop: true }),
+            resume: invokeExtension('downloads.resume'),
+            search: invokeExtension('downloads.search'),
             setUiOptions: invokeExtension('downloads.setUiOptions', { noop: true }),
-            show: invokeExtension('downloads.show', { noop: true }),
-            showDefaultFolder: invokeExtension('downloads.showDefaultFolder', { noop: true }),
+            show: invokeExtension('downloads.show'),
+            showDefaultFolder: invokeExtension('downloads.showDefaultFolder'),
             onChanged: new ExtensionEvent('downloads.onChanged'),
             onCreated: new ExtensionEvent('downloads.onCreated'),
             onDeterminingFilename: new ExtensionEvent('downloads.onDeterminingFilename'),
@@ -422,6 +465,38 @@ export const injectExtensionAPIs = () => {
             }),
             // TODO: Add native implementation
             getViews: () => [],
+          }
+        },
+      },
+
+      // Font settings aren't configurable in Electron, so this is a local
+      // stub which reports Chrome's default values as 'not_controllable'.
+      fontSettings: {
+        factory: (base) => {
+          const genericFontList = [
+            { fontId: 'sans-serif', displayName: 'Sans-Serif' },
+            { fontId: 'serif', displayName: 'Serif' },
+            { fontId: 'monospace', displayName: 'Monospace' },
+          ]
+          return {
+            ...base,
+            clearDefaultFixedFontSize: localStub(),
+            clearDefaultFontSize: localStub(),
+            clearFont: localStub(),
+            clearMinimumFontSize: localStub(),
+            getDefaultFixedFontSize: localStub({ pixelSize: 13, levelOfControl: 'not_controllable' }),
+            getDefaultFontSize: localStub({ pixelSize: 16, levelOfControl: 'not_controllable' }),
+            getFont: localStub({ fontId: '', levelOfControl: 'not_controllable' }),
+            getFontList: localStub(genericFontList),
+            getMinimumFontSize: localStub({ pixelSize: 0, levelOfControl: 'not_controllable' }),
+            setDefaultFixedFontSize: localStub(),
+            setDefaultFontSize: localStub(),
+            setFont: localStub(),
+            setMinimumFontSize: localStub(),
+            onDefaultFixedFontSizeChanged: new Event(),
+            onDefaultFontSizeChanged: new Event(),
+            onFontChanged: new Event(),
+            onMinimumFontSizeChanged: new Event(),
           }
         },
       },
@@ -464,6 +539,30 @@ export const injectExtensionAPIs = () => {
         },
       },
 
+      idle: {
+        factory: (base) => {
+          return {
+            ...base,
+            queryState: invokeExtension('idle.queryState'),
+            setDetectionInterval: invokeExtension('idle.setDetectionInterval'),
+            getAutoLockDelay: invokeExtension('idle.getAutoLockDelay'),
+            onStateChanged: new ExtensionEvent('idle.onStateChanged'),
+          }
+        },
+      },
+
+      management: {
+        factory: (base) => {
+          return {
+            ...base,
+            // Electron's native implementation of getAll never resolves.
+            get: invokeExtension('management.get'),
+            getAll: invokeExtension('management.getAll'),
+            getSelf: invokeExtension('management.getSelf'),
+          }
+        },
+      },
+
       notifications: {
         factory: (base) => {
           return {
@@ -476,6 +575,37 @@ export const injectExtensionAPIs = () => {
             onClicked: new ExtensionEvent('notifications.onClicked'),
             onButtonClicked: new ExtensionEvent('notifications.onButtonClicked'),
             onClosed: new ExtensionEvent('notifications.onClosed'),
+          }
+        },
+      },
+
+      offscreen: {
+        shouldInject: () => manifest.manifest_version === 3,
+        factory: (base) => {
+          return {
+            ...base,
+            createDocument: invokeExtension('offscreen.createDocument'),
+            closeDocument: invokeExtension('offscreen.closeDocument'),
+            hasDocument: invokeExtension('offscreen.hasDocument'),
+            // Enum normally provided by Chrome; extensions reference it when
+            // building createDocument() parameters.
+            Reason: {
+              TESTING: 'TESTING',
+              AUDIO_PLAYBACK: 'AUDIO_PLAYBACK',
+              IFRAME_SCRIPTING: 'IFRAME_SCRIPTING',
+              DOM_SCRAPING: 'DOM_SCRAPING',
+              BLOBS: 'BLOBS',
+              DOM_PARSER: 'DOM_PARSER',
+              USER_MEDIA: 'USER_MEDIA',
+              DISPLAY_MEDIA: 'DISPLAY_MEDIA',
+              WEB_RTC: 'WEB_RTC',
+              CLIPBOARD: 'CLIPBOARD',
+              LOCAL_STORAGE: 'LOCAL_STORAGE',
+              WORKERS: 'WORKERS',
+              BATTERY_STATUS: 'BATTERY_STATUS',
+              MATCH_MEDIA: 'MATCH_MEDIA',
+              GEOLOCATION: 'GEOLOCATION',
+            } as any,
           }
         },
       },
@@ -534,6 +664,22 @@ export const injectExtensionAPIs = () => {
         },
       },
 
+      // There's no side panel UI in Electron; stubbed so MV3 extensions that
+      // probe for the API don't crash.
+      sidePanel: {
+        shouldInject: () => manifest.manifest_version === 3,
+        factory: (base) => {
+          return {
+            ...base,
+            getOptions: localStub({ enabled: false }),
+            setOptions: localStub(),
+            getPanelBehavior: localStub({ openPanelOnActionClick: false }),
+            setPanelBehavior: localStub(),
+            open: localStub(),
+          }
+        },
+      },
+
       storage: {
         factory: (base) => {
           const local = base && base.local
@@ -574,6 +720,7 @@ export const injectExtensionAPIs = () => {
                 )
               }
             },
+            captureVisibleTab: invokeExtension('tabs.captureVisibleTab'),
             get: invokeExtension('tabs.get'),
             getCurrent: invokeExtension('tabs.getCurrent'),
             getAllInWindow: invokeExtension('tabs.getAllInWindow'),
@@ -621,15 +768,6 @@ export const injectExtensionAPIs = () => {
               'webNavigation.onReferenceFragmentUpdated',
             ),
             onTabReplaced: new ExtensionEvent('webNavigation.onTabReplaced'),
-          }
-        },
-      },
-
-      webRequest: {
-        factory: (base) => {
-          return {
-            ...base,
-            onHeadersReceived: new ExtensionEvent('webRequest.onHeadersReceived'),
           }
         },
       },
