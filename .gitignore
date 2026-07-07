@@ -8,3 +8,8 @@ node_modules
 noncompliant.txt
 yarn-error.log
 .DS_Store
+
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases

@@ -1,5 +1,5 @@
 {
-  "name": "electron-chrome-extensions",
+  "name": "@ramboxapp/electron-chrome-extensions",
   "version": "4.9.0",
   "description": "Chrome extension support for Electron",
   "main": "./dist/cjs/index.js",
@@ -26,7 +26,7 @@
   "scripts": {
     "build": "yarn clean && tsc && node esbuild.config.js",
     "clean": "node ../../scripts/clean.js",
-    "prepublishOnly": "NODE_ENV=production yarn build",
+    "prepublishOnly": "cross-env NODE_ENV=production yarn build",
     "pretest": "esbuild spec/fixtures/crx-test-preload.ts --bundle --external:electron --outfile=spec/fixtures/crx-test-preload.js --platform=node",
     "test": "node ./script/spec-runner.js"
   },
@@ -35,7 +35,10 @@
     "chrome",
     "extensions"
   ],
-  "repository": "https://github.com/samuelmaddock/electron-browser-shell",
+  "repository": "https://github.com/ramboxapp/electron-browser-shell",
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "author": "Samuel Maddock <sam@samuelmaddock.com>",
   "license": "SEE LICENSE IN LICENSE.md",
   "dependencies": {
@@ -49,7 +52,7 @@
     "chai": "^4.2.0",
     "chai-as-promised": "^7.1.1",
     "colors": "^1.4.0",
-    "electron": "^37.1.0",
+    "electron": "42.5.2",
     "esbuild": "^0.24.2",
     "minimist": "^1.2.7",
     "mocha": "^8.2.1",
