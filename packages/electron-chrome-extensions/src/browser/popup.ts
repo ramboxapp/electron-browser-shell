@@ -40,6 +40,7 @@ export class PopupView extends EventEmitter {
   parent?: Electron.BaseWindow
   extensionId: string
 
+  private session: Session
   private anchorRect: PopupAnchorRect
   private destroyed: boolean = false
   private hidden: boolean = true
@@ -57,6 +58,7 @@ export class PopupView extends EventEmitter {
     this.extensionId = opts.extensionId
     this.anchorRect = opts.anchorRect
     this.alignment = opts.alignment
+    this.session = opts.session
 
     this.browserWindow = new BrowserWindow({
       show: false,
@@ -68,6 +70,13 @@ export class PopupView extends EventEmitter {
       // https://github.com/electron/electron/issues/47579
       fullscreenable: false,
       resizable: false,
+      // On Windows, frameless windows still get invisible WS_THICKFRAME resize
+      // borders (8px left/right/bottom) which are included in setBounds() sizes,
+      // shrinking the web viewport below the extension's preferred size.
+      // Upstream Electron regression: reproduced on stock 42.5.2, absent on
+      // stock 37. setContentSize() doesn't help: for frameless windows
+      // Electron treats content size == window bounds, ignoring the borders.
+      thickFrame: false,
       skipTaskbar: true,
       backgroundColor: '#ffffff',
       roundedCorners: false,
@@ -99,6 +108,18 @@ export class PopupView extends EventEmitter {
 
   private async load(url: string): Promise<void> {
     const win = this.browserWindow!
+
+    // Some Electron builds don't reliably wake an idle extension service
+    // worker in response to messages sent from a freshly-opened popup, which
+    // leaves the popup's script hanging on its first request. Explicitly
+    // starting the worker for this extension's scope before the popup's own
+    // page begins loading avoids that race.
+    try {
+      const scope = `chrome-extension://${this.extensionId}/`
+      await (this.session as any).serviceWorkers?.startWorkerForScope?.(scope)
+    } catch (e) {
+      d('failed to start service worker for popup scope', e)
+    }
 
     try {
       await win.webContents.loadURL(url)
