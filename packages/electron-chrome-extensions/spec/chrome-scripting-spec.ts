@@ -8,20 +8,10 @@ describe('chrome.scripting', () => {
   const server = useServer()
   const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc-mv3' })
 
-  // The extension's service worker can still be finishing startup right
-  // after loadExtension() resolves, so the first tabs.query() call
-  // immediately afterward can race it and see no tabs yet. Retry briefly
-  // rather than gating every test on worker startup.
-  const getActiveTabId = async () => {
-    for (let attempt = 0; ; attempt++) {
-      const tabs = await browser.crx.exec('tabs.query', { active: true })
-      if (tabs.length === 1) return tabs[0].id
-      if (attempt >= 5) {
-        expect(tabs).to.have.lengthOf(1)
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100))
-    }
-  }
+  // Tab IDs are WebContents IDs, so read it from the main process instead of
+  // calling the injected tabs.query: API overrides don't reliably reach MV3
+  // service workers on Linux, where the query resolves empty.
+  const getActiveTabId = () => browser.webContents.id
 
   describe('executeScript()', () => {
     it('injects a file into the tab', async () => {
