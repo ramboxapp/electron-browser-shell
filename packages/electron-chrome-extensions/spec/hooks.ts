@@ -103,6 +103,9 @@ export const useExtensionBrowser = (opts: {
       w.webContents.on('console-message' as any, (_e: any, level: any, message: any) => {
         console.log(`[renderer]`, typeof message === 'string' ? message : JSON.stringify(message))
       })
+      customSession.serviceWorkers.on('console-message', (_e, details) => {
+        console.log(`[service-worker]`, details.message)
+      })
     }
 
     if (opts.openDevTools) {

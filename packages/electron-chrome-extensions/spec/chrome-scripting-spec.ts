@@ -8,10 +8,19 @@ describe('chrome.scripting', () => {
   const server = useServer()
   const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc-mv3' })
 
+  // The extension's service worker can still be finishing startup right
+  // after loadExtension() resolves, so the first tabs.query() call
+  // immediately afterward can race it and see no tabs yet. Retry briefly
+  // rather than gating every test on worker startup.
   const getActiveTabId = async () => {
-    const tabs = await browser.crx.exec('tabs.query', { active: true })
-    expect(tabs).to.have.lengthOf(1)
-    return tabs[0].id
+    for (let attempt = 0; ; attempt++) {
+      const tabs = await browser.crx.exec('tabs.query', { active: true })
+      if (tabs.length === 1) return tabs[0].id
+      if (attempt >= 5) {
+        expect(tabs).to.have.lengthOf(1)
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
   }
 
   describe('executeScript()', () => {

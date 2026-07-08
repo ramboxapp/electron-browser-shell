@@ -47,6 +47,9 @@ app.on('window-all-closed', () => null)
 // Use fake device for Media Stream to replace actual camera and microphone.
 app.commandLine.appendSwitch('use-fake-device-for-media-stream')
 
+// Allow chrome.offscreen.createDocument({ reasons: ['TESTING'] }) in specs.
+app.commandLine.appendSwitch('offscreen-document-testing')
+
 // @ts-ignore
 global.standardScheme = 'app'
 // @ts-ignore
