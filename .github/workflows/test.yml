@@ -2,11 +2,7 @@ name: Test electron-chrome-extensions
 
 on:
   push:
-    paths:
-      - 'packages/**'
   pull_request:
-    paths:
-      - 'packages/**'
 
 jobs:
   test:
