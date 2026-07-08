@@ -91,8 +91,8 @@ Methods: `create`, `get`, `getAll`, `clear`, `clearAll`. Event: `onAlarm`.
 
 ### 2. `chrome.idle` — HIGH — ✅ IMPLEMENTED
 **Fleet:** 1Password, Bitwarden, and all password managers — vault auto-lock. Without it, MV3 service workers may throw on startup.
-`src/browser/api/idle.ts`. Maps to Electron `powerMonitor.getSystemIdleState()` / `getSystemIdleTime()`.
-Methods: `queryState`, `setDetectionInterval`, `getAutoLockDelay` (returns 0). Event: `onStateChanged` (poll with the detection interval, emit on transitions).
+`src/browser/api/idle.ts`. Maps to Electron `powerMonitor.getSystemIdleState()`.
+Methods: `queryState`, `setDetectionInterval`, `getAutoLockDelay` (returns 0). Event: `onStateChanged` — a single fixed 15s poller evaluates each extension's state using its configured detection interval (default 60s, min 15s per Chrome) and emits on transitions.
 
 ### 3. `chrome.scripting` — HIGH (MV3) — ✅ NATIVE, VERIFIED
 **Fleet:** Bitwarden, 1Password, KeePassXC, Grammarly, Proton Pass — all MV3 extensions.
@@ -114,7 +114,7 @@ Electron implements `chrome.management` natively, but **`getAll()` never resolve
 ### 7. `chrome.downloads` — MEDIUM (basic) — ✅ IMPLEMENTED
 **Fleet:** 1Password (vault export). Web Store examples: GoFullPage, Save Emails to PDF, Nimbus Capture.
 `src/browser/api/downloads.ts`, replacing the old noop stubs.
-Methods: `download` (→ `session.downloadURL` + `will-download` tracking), `search`, `cancel`, `pause`, `resume`, `erase`. Events: `onCreated`, `onChanged`, `onErased`.
+Methods: `download` (→ `session.downloadURL` + `will-download` tracking), `search`, `cancel`, `pause`, `resume`, `erase`, plus `open`, `show`, `showDefaultFolder` (via `shell`). Events: `onCreated`, `onChanged`, `onErased`. All handlers enforce the `downloads` manifest permission. Still noop in the renderer: `acceptDanger`, `getFileIcon`, `removeFile`, `setUiOptions`.
 
 ### 8. `chrome.tabs.captureVisibleTab` — MEDIUM-LOW — ✅ IMPLEMENTED
 **Fleet:** none confirmed. Web Store examples (work/productivity): GoFullPage, Awesome Screenshot, Evernote Web Clipper, Nimbus Capture, Loom.
@@ -203,7 +203,7 @@ New APIs get specs following the existing `chrome-tabs-spec.ts` pattern:
 
 - `chrome-alarms-spec.ts` — create alarm with `delayInMinutes: 0.01`, await `alarms.onAlarm` via `event-once`; verify `get`/`getAll`/`clear` round-trips.
 - `chrome-idle-spec.ts` — `queryState` returns `'active' | 'idle' | 'locked'`; `setDetectionInterval` doesn't throw.
-- `chrome-scripting-spec.ts` — needs a new **MV3 fixture** (`spec/fixtures/rpc-mv3` with a service worker) since the current `rpc` fixture is MV2; assert `executeScript` returns injection results and `insertCSS`/`removeCSS` mutate a loaded page.
+- `chrome-scripting-spec.ts` — uses the **MV3 fixture** (`spec/fixtures/rpc-mv3`, service worker) since the `rpc` fixture is MV2; asserts `executeScript` with `files` mutates the page title and `insertCSS` changes computed styles. The tab ID is read from the main process (`browser.webContents.id`) because injected API overrides don't reliably reach MV3 service workers on Linux.
 - `chrome-downloads-spec.ts` — serve a file from a local `http` server (pattern already used in existing specs), call `downloads.download`, await `onCreated`/`onChanged` state transitions.
 - `chrome-management-spec.ts` — `getAll` includes the rpc fixture; `getSelf` returns the caller.
 - `offscreen` — covered indirectly in the MV3 fixture: `createDocument` + `hasDocument` + message round-trip to the offscreen page.
@@ -259,11 +259,13 @@ Implemented and covered by specs (`yarn test`):
 | `chrome.fontSettings` | Safe renderer stubs | — |
 | `chrome.webRequest` | Native passthrough restored (dead override removed) | — |
 
-Known pre-existing test failures on Windows (fail identically on an untouched checkout):
-- `nativeMessaging sendNativeMessage()` ×2 — the spec builds/registers a native host binary and fails in this environment. Native messaging itself works (fleet extensions use it in production).
-- `chrome.tabs executeScript()` ×2 (MV2) — Electron-native code path, flaky/timing out in this environment.
+**Latest full-suite audit (2026-07-08): 87 pass / 0 fail — fully green.**
 
-Final suite result after implementation: **83 pass / 4 fail (all 4 pre-existing)**.
+Known **flaky** specs on Windows (failed in earlier runs — also on an untouched checkout — then passed on the audit run; environment-dependent, not deterministic):
+- `nativeMessaging sendNativeMessage()` ×2 — the spec builds/registers a native host binary; sensitive to environment state.
+- `chrome.tabs executeScript()` ×2 (MV2) — Electron-native code path, intermittent timeouts.
+
+If these fail in a future run, verify against an untouched checkout before blaming a change (earlier session runs recorded 83 pass / 4 fail with exactly these four failing).
 
 Notes:
 - The MV3 spec fixture (`spec/fixtures/rpc-mv3`) defines its main-world bridge via a `"world": "MAIN"` content script; MV2-style script-tag injection is unreliable in MV3 pages.
