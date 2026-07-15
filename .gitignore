@@ -8,6 +8,7 @@ node_modules
 noncompliant.txt
 yarn-error.log
 .DS_Store
+.crx-css-patched
 
 .yarn/*
 !.yarn/patches

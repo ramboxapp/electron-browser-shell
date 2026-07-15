@@ -34,6 +34,14 @@ module.exports = {
         devServer: {
           client: {
             overlay: false,
+            // The preload is injected into every frame of the session, including
+            // remote HTTPS pages. The default HMR socket URL uses the dev server
+            // host (0.0.0.0), which HTTPS pages reject as mixed content and the
+            // resulting SecurityError aborts the whole preload script. localhost
+            // is exempt from mixed content checks, so use it explicitly.
+            webSocketURL: {
+              hostname: 'localhost',
+            },
           },
         },
       },

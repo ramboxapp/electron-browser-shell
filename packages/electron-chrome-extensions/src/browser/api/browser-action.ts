@@ -204,6 +204,23 @@ export class BrowserActionAPI {
       this.onUpdate()
     })
 
+    // Chrome closes the action popup whenever the extension opens a tab that
+    // takes focus. Our popup only closes itself on window blur, which doesn't
+    // fire when the new tab renders inside the same shell window — leaving a
+    // stale popup floating over the page (seen with Dashlane's "create
+    // account", which opens its signup tab from the popup). The delay lets
+    // the tabs.create IPC reply reach the popup before it's destroyed, like
+    // Chrome's focus-driven close would.
+    this.ctx.store.on('extension-created-tab', (extensionId: string, active: boolean) => {
+      const popup = this.popup
+      if (active && popup && !popup.isDestroyed() && popup.extensionId === extensionId) {
+        setTimeout(() => {
+          if (!popup.isDestroyed()) popup.destroy()
+        }, 50)
+        this.popup = undefined
+      }
+    })
+
     this.setupSession(this.ctx.session)
   }
 
@@ -215,6 +232,14 @@ export class BrowserActionAPI {
 
     sessionExtensions.on('extension-unloaded', (event, extension) => {
       this.removeActions(extension.id)
+
+      // Chrome closes an unloaded extension's popup. Without this, the popup
+      // outlives e.g. a chrome.runtime.reload() with an invalidated context
+      // that can never talk to the extension again.
+      if (this.popup && !this.popup.isDestroyed() && this.popup.extensionId === extension.id) {
+        this.popup.destroy()
+        this.popup = undefined
+      }
     })
   }
 

@@ -1,8 +1,13 @@
 const path = require('path')
+const { promises: fs } = require('fs')
 const { app, session, BrowserWindow, dialog } = require('electron')
 
 const { Tabs } = require('./tabs')
-const { ElectronChromeExtensions } = require('electron-chrome-extensions')
+const {
+  ElectronChromeExtensions,
+  patchActiveTabManifest,
+  patchExtensionCssMessages,
+} = require('electron-chrome-extensions')
 const { setupMenu } = require('./menu')
 const { buildChromeContextMenu } = require('electron-chrome-context-menu')
 const { installChromeWebStore, loadAllExtensions } = require('electron-chrome-web-store')
@@ -19,6 +24,48 @@ const PATHS = {
 }
 
 let webuiExtensionId
+
+/**
+ * Applies patchActiveTabManifest (activeTab → static <all_urls> grant, see
+ * the library docs for why Electron needs this) to every unpacked extension
+ * found under the given roots. Chrome Web Store installs nest a version
+ * directory (<id>/<version>/manifest.json) while local unpacked extensions
+ * keep manifest.json at the top level, so both depths are probed. Must run
+ * before the extensions are loaded into the session.
+ */
+async function patchActiveTabManifests(rootDirs) {
+  const tryPatch = async (dir) => {
+    try {
+      await patchActiveTabManifest(dir)
+    } catch (error) {
+      // A malformed manifest shouldn't abort loading the rest of the fleet.
+      console.error(`Failed to patch extension manifest in ${dir}`, error)
+    }
+  }
+
+  for (const rootDir of rootDirs) {
+    let entries
+    try {
+      entries = await fs.readdir(rootDir, { withFileTypes: true })
+    } catch {
+      continue // Root doesn't exist yet (no extensions installed there).
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const extDir = path.join(rootDir, entry.name)
+      await tryPatch(extDir)
+
+      let subEntries = []
+      try {
+        subEntries = await fs.readdir(extDir, { withFileTypes: true })
+      } catch {}
+      for (const sub of subEntries) {
+        if (sub.isDirectory()) await tryPatch(path.join(extDir, sub.name))
+      }
+    }
+  }
+}
 
 const getParentWindowOfTab = (tab) => {
   switch (tab.getType()) {
@@ -200,6 +247,13 @@ class Browser {
     // Display <browser-action-list> extension icons.
     ElectronChromeExtensions.handleCRXProtocol(this.session)
 
+    // Electron doesn't substitute the __MSG_@@extension_id__ i18n token in
+    // extension CSS, so asset URLs like the Grammarly toolbar icon 404. Rewrite
+    // the token on disk once each extension is loaded (its ID is known by then).
+    this.session.extensions.on('extension-loaded', (_event, extension) => {
+      patchExtensionCssMessages(extension.path, extension.id)
+    })
+
     this.extensions.on('browser-action-popup-created', (popup) => {
       this.popup = popup
     })
@@ -213,6 +267,15 @@ class Browser {
 
     const webuiExtension = await this.session.extensions.loadExtension(PATHS.WEBUI)
     webuiExtensionId = webuiExtension.id
+
+    // Grant activeTab-only extensions static host access before anything
+    // loads them (Electron never grants activeTab — see patchActiveTabManifest
+    // in electron-chrome-extensions). Extensions installed from the Web Store
+    // mid-session are patched on the next launch.
+    await patchActiveTabManifests([
+      path.join(app.getPath('userData'), 'Extensions'),
+      PATHS.LOCAL_EXTENSIONS,
+    ])
 
     // Wait for web store extensions to finish loading as they may change the
     // newtab URL.

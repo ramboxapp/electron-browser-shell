@@ -3088,25 +3088,14 @@ __metadata:
   languageName: unknown
   linkType: soft
 
-"electron-chrome-web-store@npm:^0.10.0":
-  version: 0.10.0
-  resolution: "electron-chrome-web-store@npm:0.10.0"
-  dependencies:
-    "@types/chrome": "npm:^0.0.287"
-    adm-zip: "npm:^0.5.16"
-    debug: "npm:^4.3.7"
-    pbf: "npm:^4.0.1"
-  checksum: 10c0/9b0dfbb0697f0a6ba2068ec64dee7ab5c3fcbae1dea68fcb9646e5124dea49432b36a13ba1bc06a3ad549dd8e2ee4ebc7182444ca326f2f3babe7730f22a433b
-  languageName: node
-  linkType: hard
-
-"electron-chrome-web-store@workspace:packages/electron-chrome-web-store":
+"electron-chrome-web-store@npm:^0.13.0, electron-chrome-web-store@workspace:packages/electron-chrome-web-store":
   version: 0.0.0-use.local
   resolution: "electron-chrome-web-store@workspace:packages/electron-chrome-web-store"
   dependencies:
     "@types/chrome": "npm:^0.0.287"
     adm-zip: "npm:^0.5.16"
     debug: "npm:^4.3.7"
+    electron-chrome-extensions: "npm:@ramboxapp/electron-chrome-extensions@^4.9.0"
     esbuild: "npm:^0.24.0"
     pbf: "npm:^4.0.1"
     rimraf: "npm:^6.0.1"
@@ -7340,7 +7329,7 @@ __metadata:
     electron: "npm:42.5.2"
     electron-chrome-context-menu: "npm:^1.1.0"
     electron-chrome-extensions: "npm:@ramboxapp/electron-chrome-extensions@^4.9.0"
-    electron-chrome-web-store: "npm:^0.10.0"
+    electron-chrome-web-store: "npm:^0.13.0"
     electron-squirrel-startup: "npm:^1.0.0"
   languageName: unknown
   linkType: soft

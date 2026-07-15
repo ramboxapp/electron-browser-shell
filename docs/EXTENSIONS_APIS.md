@@ -30,13 +30,13 @@ Sourced from each extension's actual manifest (GitHub for open-source ones; chro
 | 2 | Bitwarden | 3 | alarms, idle, offscreen, scripting, sidePanel, webRequest, webRequestAuthProvider, clipboardRead/Write, nativeMessaging (opt), contextMenus, notifications, webNavigation | ✅ Fully covered (webRequest via restored native passthrough — retest recommended) |
 | 3 | Boomerang | 3 | **management** (explicit — conflicting-extension detection) | ✅ Fully covered |
 | 4 | Dark Reader | 2 | alarms, fontSettings, contextMenus (opt) | ✅ Fully covered |
-| 5 | Dashlane | 3 | contextMenus, cookies, idle, privacy, storage, tabs, unlimitedStorage, scripting, webRequest, webRequestAuthProvider, alarms, **declarativeNetRequest** | ⚠️ Gap: `declarativeNetRequest` (Out of Scope) |
+| 5 | Dashlane | 3 | contextMenus, cookies, idle, privacy, storage, tabs, unlimitedStorage, scripting, webRequest, webRequestAuthProvider, alarms, **declarativeNetRequest** | ⚠️ Gap: `declarativeNetRequest` (Out of Scope). Its account-creation flow was also broken by tabs not reloading after `chrome.runtime.reload()` (its `reloadOnLogout` task) — fixed 2026-07-10, see Tier 3 notes |
 | 6 | DragApp | ❓ | dragapp.com/google.com/googleapis.com host access; no `chrome.*` permission list surfaced | ❓ Unverified, likely baseline-only |
 | 7 | GMass | 3 | described as "very minimum permissions" + script injection (activeTab/scripting implied) | ✅ Likely fully covered |
 | 8 | Google Translate | ❓ | no manifest surfaced; Google's own extension, historically contextMenus + storage | ❓ Unverified, likely fully covered |
 | 9 | Grammarly | ❓ | scripting, activeTab | ✅ Fully covered |
 | 10 | Keeper | ❓ | tabs; vault-domain host permissions; full list not surfaced | ❓ Unverified, likely same pattern as other password managers |
-| 11 | LastPass | 3 | scripting, storage, webRequestAuthProvider, offscreen, alarms, **declarativeNetRequestWithHostAccess** (idle was removed Dec 2024) | ⚠️ Gap: `declarativeNetRequestWithHostAccess` (Out of Scope) |
+| 11 | LastPass | 3 | scripting, storage, webRequest, webRequestAuthProvider, offscreen, alarms (idle removed Dec 2024; **DNR permission NOT present in installed 4.154.2 manifest** — earlier chrome-stats data was stale) | ✅ API-covered — its Tier 3 login failure is unrelated to any API gap (debug via fix-app-extension) |
 | 12 | NordPass | 3 | alarms, contextMenus, idle, privacy | ✅ Fully covered |
 | 13 | NordPass2 | 3 | legacy Web Store listing, same codebase as NordPass | ✅ Fully covered |
 | 14 | Roboform | 3 | tabs access confirmed; full list not surfaced; has nativeMessaging for its desktop app | ❓ Unverified, likely fully covered |
@@ -103,6 +103,8 @@ Electron implements `chrome.scripting` natively ("all features supported" per El
 `src/browser/api/offscreen.ts`. Offscreen document = hidden `BrowserWindow` loading the `chrome-extension://` page; Electron's native extension messaging connects it to the service worker automatically. Chrome allows at most one offscreen document per extension, enforced here too.
 Methods: `createDocument`, `closeDocument`, `hasDocument`.
 
+**Bug found and fixed (2026-07-11), via Keeper.** Keeper's popup hung forever on a blank screen, never reaching its login form (the offscreen document it creates on startup — `content_scripts/tab_worker/index.html#offscreen` — froze on "Decrypting your Vault data..." indefinitely). Root cause: `createDocument()` never signaled to Electron that the calling MV3 service worker was still "doing work" while awaiting a reply from the offscreen document it had just created — Electron could recycle the SW mid-await (confirmed via CDP: the SW's target churned through 3 different instances within ~15s of activity), leaving the offscreen document waiting forever for a reply from a service worker that no longer existed. Not Keeper-specific — any extension using `chrome.offscreen` for async work (e.g. Bitwarden's clipboard operations) could hit the same failure. Fixed by pinning the calling service worker alive via `event.sender.startTask()` for the offscreen document's full lifetime (ended on the document's `'destroyed'` event, covering every teardown path with one source of truth) — matches Chrome's own behavior, where an open offscreen document keeps its extension's SW alive. Manually reverified with real Keeper: popup now renders the login screen instead of hanging, and the SW target stayed stable (no churn) for 30s post-click. Specs: `chrome-offscreen-spec.ts` (`startTask`/`.end()` call assertions + a SW-to-offscreen-document `sendMessage` round-trip regression test — the interaction pattern that used to hang, previously untested).
+
 ### 5. `chrome.contextMenus.update` — MEDIUM — ✅ IMPLEMENTED
 **Fleet:** Bitwarden, KeePassXC, 1Password update menu entries per-site. Was noop.
 Implemented in `src/browser/api/context-menus.ts` (mutates stored item properties).
@@ -128,16 +130,60 @@ Renderer-only stub: `setOptions`, `setPanelBehavior`, `open`, `getOptions` as no
 **Fleet:** Dark Reader (font picker in its popup UI).
 Renderer-only stub following the existing `privacy`/ChromeSetting pattern: `getFontList` returns a static list of generic families (`sans-serif`, `serif`, `monospace`), `getFont`/`setFont`/`clearFont` and per-type size settings as ChromeSetting noops. Near-zero cost, prevents Dark Reader's settings UI from throwing.
 
+### 11. `activeTab` permission — ✅ WORKED AROUND (found during manual testing, 2026-07-08)
+**Fleet:** Google Translate (confirmed — popup selection-translate died with Chromium's `kCannotAccessPage`), plus any extension using the popup + `activeTab` pattern (candidates: GMass, Calendly, DeepL).
+**Root cause:** in Chrome, clicking the toolbar action invokes Chromium's `ActiveTabPermissionGranter`, temporarily granting host access to the active tab — which is what authorizes `scripting.executeScript` from popups of extensions with no static host permissions. In this library the action click is synthesized (`<browser-action-list>` → `PopupView`), Chromium never sees it, `activeTab` is never granted, and its native permission check rejects the injection. No Electron API exists to grant it.
+**Workaround:** `patchActiveTabManifest(extensionPath)` (`src/browser/active-tab-patch.ts`, exported like `patchModuleServiceWorker`) — rewrites the manifest on disk before `loadExtension()`, adding `<all_urls>` (MV3 `host_permissions` / MV2 `permissions`) to extensions that declare `activeTab`. Electron auto-grants declared host permissions, so Chromium's check passes. Trade-off: permanent access instead of Chrome's per-gesture grant — acceptable in this trust model. Applied by both consumers: the shell (`packages/shell/browser/main.js`, both extension sources, pre-load) and Rambox (`src/main/extensions.ts` `loadExtension`, alongside `patchModuleServiceWorker`).
+
+**No-throw contract (both patch utilities):** `patchActiveTabManifest` *and* `patchModuleServiceWorker` are guaranteed to never throw — a failed patch (disk write error, malformed manifest) logs and degrades to "extension loads unpatched" instead of aborting the caller's `loadExtension()`. Rationale: Rambox's `loadExtension` wraps everything in one try/catch, so a throwing patch used to skip the entire extension for that launch — losing 100% of an extension to protect a fix for 1% of it. Both also tolerate a UTF-8 BOM in `manifest.json` (Chromium accepts it; naive `JSON.parse` doesn't). Spec-covered in `active-tab-patch-spec.ts`.
+
 ---
 
 ## Phase 2 (explicitly deferred)
 
+> **Implementation plan: [EXTENSIONS_APIS_PHASE2.md](./EXTENSIONS_APIS_PHASE2.md)** (2026-07-15) — re-scoped with Tier 3 evidence + installed-manifest scan: DNR v1 (dynamic rules + small static rulesets) is the centerpiece; a webRequest-coexistence spike comes first; `getAuthToken`/`tts` demoted to evidence-gated design sketches. Notably: **LastPass 4.154.2's installed manifest no longer declares DNR** (stale chrome-stats data — row 11 corrected), and the fleet's ad-blocker is now uBlock Origin Lite (pure DNR, gated as v2 pending a perf measurement).
+
 | API | Fleet need | Reason to defer |
 |---|---|---|
 | `chrome.webRequest` (observational + blocking) | uBlock (blocking is mandatory), MailTrack, Enpass, Bitwarden/KeePassXC (basic-auth autofill) | Electron implements extension `webRequest` natively ("all features supported" per docs). The preload used to clobber `onHeadersReceived` with a dead stub — that override was removed so the native API passes through. Re-test uBlock/MailTrack/Enpass before writing any library code here |
-| `chrome.declarativeNetRequest` | **Dashlane, LastPass, Streak, HubSpot, DeepL** (5 extensions — reclassified from Out of Scope after per-extension research; originally assumed uBlock-only) | Still high complexity (rule-based network interception, separate from `webRequest`), but the 5-extension footprint means it's worth re-scoping rather than permanently shelving. None of the 5 are ad-blockers — likely used for lighter things (auth header injection, redirect rules) that may not need the full declarativeNetRequest rule engine. Needs per-extension investigation of *why* each one declares it before deciding on an implementation approach |
+| `chrome.declarativeNetRequest` | **Dashlane, HubSpot** (dynamic rules only), **DeepL** (1 static `modifyHeaders` rule + dynamic), **Streak** (per chrome-stats; unverified locally), **uBlock Origin Lite** (full static engine — v2 gate) | Per-extension investigation DONE (2026-07-15, installed-manifest scan): the fleet needs dynamic rules + tiny static rulesets, NOT Chromium's full engine. LastPass dropped out (installed manifest has no DNR). **Scoped and planned — see [EXTENSIONS_APIS_PHASE2.md](./EXTENSIONS_APIS_PHASE2.md) P2.1** |
 | `chrome.identity.getAuthToken` | Likely Boomerang/GMass/Streak/HubSpot (Google OAuth) | Chrome-specific Google account integration; fallback via `launchWebAuthFlow` possible but needs per-extension testing first |
 | `chrome.tts` | DeepL, Google Translate ("read aloud") | Nice-to-have; core translate works without it |
+| `chrome.runtime` `externally_connectable` | Theoretical — no longer confirmed against any fleet extension. Initially suspected for Dashlane's account-creation flow (2026-07-08) but the real cause was tabs not reloading after `chrome.runtime.reload()`, fixed 2026-07-10 (see Tier 3 notes) — not a missing `externally_connectable` capability. Still plausible for other password managers with a website→extension signup handoff (Keeper, Roboform, etc.), but unverified | Requires injecting a scoped `chrome.runtime.connect`/`sendMessage` into *ordinary web pages* matching an installed extension's manifest `externally_connectable.matches`, routed to that extension's `onConnectExternal`/`onMessageExternal`. Unlike the rest of this library's gaps, this isn't confined to extension-page contexts — it touches the main preload injection path for arbitrary web content (currently gated to `chrome-extension://` pages/service workers only, see `src/preload.ts`), with security implications since it must be scoped strictly per-extension, per-origin |
+
+## Phase 3 — MV2/MV3 cross-coverage (spec parity)
+
+**Background (analysis result, 2026-07-08).** The library supports both manifest versions by architecture, and the implemented APIs inherit that support with no per-version code:
+
+- Two preloads are registered (`crx-mv2-preload` type `frame` for MV2 background pages, `crx-mv3-preload` type `service-worker` for MV3), injecting the same API surface into both contexts.
+- The router abstracts the sender (`frame` vs `service-worker`) — browser-side handlers are version-agnostic by construction.
+- Event delivery handles both: frame listeners via `host.send()`, service-worker listeners via `startWorkerForScope()` + `send()` — i.e. **a sleeping MV3 service worker is woken before an event is delivered**. Combined with alarms living as main-process timers, this matches Chrome's MV3 semantics (alarms survive SW termination).
+- Renderer gates mirror Chrome exactly: `offscreen`/`sidePanel` inject MV3-only; everything else (alarms, idle, downloads, management, fontSettings, captureVisibleTab) injects in both, as in Chrome.
+
+**The gap is test coverage, not functionality:** each new API is spec-tested on only one manifest version — alarms/idle/downloads/management/captureVisibleTab run only on the MV2 `rpc` fixture; offscreen/scripting only on the MV3 `rpc-mv3` fixture. Both IPC transports are proven green, but the single most fleet-critical combination — **an MV3 service worker (all password managers) receiving `alarms.onAlarm`/`idle.onStateChanged`, including the wake-from-idle path** — has no direct spec.
+
+| # | Item | Detail | Effort |
+|---|---|---|---|
+| 3.1 | Parametrize specs across both fixtures | Wrap the `describe` blocks of `chrome-alarms-spec.ts` and `chrome-idle-spec.ts` in a `forEach` over `['rpc', 'rpc-mv3']` (the harness already takes `extensionName`). Priority: alarms `onAlarm` on MV3 — the password-manager case | Low |
+| 3.2 | Extend `rpc-mv3` fixture permissions | Add `downloads` + `management` to `spec/fixtures/rpc-mv3/manifest.json` so 3.3 can run (alarms/idle/tabs are already declared) | Trivial |
+| 3.3 | Same parametrization for downloads/management/captureVisibleTab | Lower priority than 3.1 — no fleet extension calls these from an MV2 context that isn't already covered | Low |
+| 3.4 | Alarm persistence across app restarts (optional) | Chrome persists alarms to disk; ours are in-memory (documented in `alarms.ts`). Low real-world risk — extensions must tolerate missed alarms and password managers re-create them at SW startup. Implement only if a fleet extension is observed to depend on it: serialize the per-extension alarm map and reschedule on `AlarmsAPI` construction | Medium |
+
+Acceptance for Phase 3: `yarn test` green with the parametrized specs running each covered API on **both** fixtures.
+
+## Phase 4 — Suspected Linux MV3 service-worker injection gap (unconfirmed)
+
+**Background (2026-07-08).** While reviewing Phase 3's cross-fixture coverage, a platform-specific failure mode was identified in the injection mechanism itself, not just its test coverage. The `chrome.*` overrides are applied to the MV3 service worker via `contextBridge.executeInMainWorld` (`src/renderer/index.ts`, inside `injectExtensionAPIs`), after the preload is registered as `type: 'service-worker'` under the id `crx-mv3-preload` (`src/browser/index.ts`). There's a hypothesis — **not yet confirmed by an automated spec** — that this injection silently doesn't take effect inside MV3 service workers on Linux, while working correctly on Windows: a call like `chrome.tabs.query({ active: true })` from an extension's background service worker would then fall through to Electron's native (unmodified) implementation instead of the library's `TabsAPI` override.
+
+No current spec can confirm or refute this: `chrome-tabs-spec.ts` (and every other override spec except scripting/offscreen) only runs against the MV2 `rpc` fixture; only `chrome-scripting-spec.ts` and `chrome-offscreen-spec.ts` exercise the MV3 `rpc-mv3` fixture, and neither asserts on an overridden `tabs`/`windows`/`management`/`alarms` result. CI (`.github/workflows/test.yml`) already runs the full suite on both `ubuntu-latest` and `windows-latest`, so a spec that exercises an override on `rpc-mv3` would surface a real platform divergence automatically, if one exists.
+
+| # | Item | Detail | Effort |
+|---|---|---|---|
+| 4.1 | Confirm on Linux | Add a temporary `tabs.query`-on-`rpc-mv3` assertion (or reuse Phase 3.1's parametrization) and run on a Linux machine, or temporarily set `SPEC_LOG_CONSOLE=1` in `test.yml`'s `ubuntu-latest` leg — `spec/hooks.ts` relays service-worker console output, so this shows whether `injectExtensionAPIs error (...)` (`src/renderer/index.ts:841`) is logged in the SW context. Note the try/catch only fires if `executeInMainWorld` itself throws — a silent no-op (override never applied, nothing logged) is also possible and must be checked for directly by asserting on behavior, not just the console | Low |
+| 4.2 | Make it a permanent regression check | If confirmed, fold a `tabs`/`alarms` override assertion against `rpc-mv3` into Phase 3.1's parametrized specs so both OS legs of CI cover it going forward, instead of relying on manual reproduction | Low |
+| 4.3 | Fix | If confirmed as a genuine Electron gap: report upstream to electron/electron (`contextBridge.executeInMainWorld` for service-worker preloads), and implement a fallback injection path for Linux in the meantime — `src/renderer/index.ts` already has a `webFrame.executeJavaScript` fallback for when `executeInMainWorld` isn't available at all (lines 836-838, marked `TODO(mv3): remove webFrame usage`), which is a plausible starting point for a platform-gated fallback | Medium (pending root cause) |
+
+**Impact if confirmed:** MV3 extensions on Linux builds of Rambox — i.e. most of the password-manager fleet — would silently receive Electron's native `chrome.tabs`/`chrome.windows`/`chrome.management`/`chrome.alarms` instead of this library's overrides from their background service worker, with no thrown error to signal the degradation.
 
 ## Out of Scope
 
@@ -165,6 +211,9 @@ Renderer-only stub following the existing `privacy`/ChromeSetting pattern: `getF
 | `spec/chrome-scripting-spec.ts` | New — guards that the preload doesn't clobber Electron's native `chrome.scripting` (no library file was needed, see §3) |
 | `spec/chrome-contextMenus-spec.ts` | Extended with `update()` cases |
 | `spec/fixtures/rpc-mv3/` | New MV3 fixture (service worker + `"world": "MAIN"` bridge) used by the scripting/offscreen specs |
+| `src/browser/active-tab-patch.ts` + `spec/active-tab-patch-spec.ts` | New — activeTab → `<all_urls>` manifest grant (§11), exported from the package entry |
+| `packages/shell/browser/main.js` | Applies the activeTab patch to both extension sources before loading |
+| Rambox `src/main/extensions.ts` (desktop repo) | Applies the activeTab patch in `loadExtension`, alongside `patchModuleServiceWorker` |
 
 **No `src/browser/api/scripting.ts` was created** — `chrome.scripting` turned out to be fully native in Electron 42 (see §3); this was in the original file list below before that was verified.
 
@@ -208,13 +257,15 @@ New APIs get specs following the existing `chrome-tabs-spec.ts` pattern:
 - `chrome-management-spec.ts` — `getAll` includes the rpc fixture; `getSelf` returns the caller.
 - `offscreen` — covered indirectly in the MV3 fixture: `createDocument` + `hasDocument` + message round-trip to the offscreen page.
 
+Note: each spec currently runs against a single manifest version (MV2 `rpc` or MV3 `rpc-mv3`). Cross-version parity is tracked as **Phase 3** above.
+
 ### Tier 2 — API probe extension (semi-automated, in the shell) — NOT BUILT
 
 Originally planned: a throwaway `api-probe` extension (in `spec/fixtures/`, loadable manually with `yarn start` in the shell) whose service worker calls every implemented method and logs `PASS`/`FAIL` per API. **Skipped** — Tier 1's mocha specs ended up covering every API directly, so this extra manual-conformance layer wasn't needed. Revisit only if a future API is hard to cover with a mocha spec (e.g. something that needs a real user gesture).
 
-### Tier 3 — Manual verification with the real fleet (in Rambox) — NOT YET DONE
+### Tier 3 — Manual verification with the real fleet — NOT YET DONE
 
-Not run in this session (would require Rambox running in dev mode). This is the recommended next step before considering the fleet "fixed" — the specs prove the APIs behave per the Chrome spec, not that any specific extension in the fleet is now unblocked.
+**Tracked and executed via [EXTENSIONS_API_MANUAL_TEST.md](./EXTENSIONS_API_MANUAL_TEST.md)** — a per-extension checklist (all 29, same order as the research table) run in this repo's shell app first, then Rambox. This is the recommended next step before considering the fleet "fixed" — the specs prove the APIs behave per the Chrome spec, not that any specific extension in the fleet is now unblocked.
 
 Run Rambox in dev mode (CDP at localhost:9222) and exercise the highest-signal flows:
 
@@ -231,6 +282,34 @@ Run Rambox in dev mode (CDP at localhost:9222) and exercise the highest-signal f
 | Any password manager | Right-click a login field → context menu entry reflects current site | `contextMenus.update` |
 
 Acceptance bar per extension: no uncaught `chrome.*` errors in the service worker console **and** its core user flow works end-to-end.
+
+### Bugs found and fixed during Tier 3 testing (1Password, 2026-07-09)
+
+Manually testing 1Password in this repo's shell surfaced three real bugs beyond the originally planned API list — none were extension-specific in the end, all fixed in the shared library:
+
+1. **Module service worker never registers** (`"background":{"type":"module"}`) — Electron regression, not castlabs-specific. Fixed generically via `patchModuleServiceWorker()`, rewriting the SW into a classic script before `loadExtension()`. See the `fix-app-extension` skill's Known fixes table for the full writeup.
+2. **Idle service worker doesn't wake on message** — likely an Electron bug (real Chrome wakes idle MV3 workers on demand). Consolidated into `wakeExtensionServiceWorker()`, called by the library itself before `createTab`/`createWindow`/popup loads, and by each consumer once right after `loadExtension()`.
+3. **`ExtensionEvent.hasListener`/`hasListeners`/`getRules`/`addRules`/`removeRules` threw `Error('Method not implemented.')`** — this is what was actually blocking 1Password's first-run notification toast (its content-script icon worked fine; the SW crashed on an uncaught rejection from one of these). Real Chrome never throws here. Fixed to match Chrome's behavior (empty results / boolean, no throw). Spec: `chrome-events-spec.ts`.
+
+All three are documented in detail (root cause, exact fix, file locations) in the `fix-app-extension` skill's Known fixes table — check there before re-diagnosing a similar symptom.
+
+### Bugs found and fixed during Tier 3 testing (Dashlane, 2026-07-09 → 2026-07-10)
+
+Dashlane's account-creation hang took several rounds to root-cause; two hardening changes landed along the way (kept, but neither fixed the hang), and the real cause was found on 2026-07-10 by reproducing the full flow in an isolated Electron harness instead of theorizing from logs.
+
+**The actual root cause — Electron doesn't reload an extension's open tabs when the extension reloads.** Dashlane's "Crear una cuenta" popup button does two things at once: opens `index.html#/signup` via `chrome.tabs.create()`, and logs out — and its background runs a task literally named `reloadOnLogout` that calls **`chrome.runtime.reload()`** (implemented in Electron: verified `typeof chrome.runtime.reload === 'function'` in an MV3 SW, and calling it fires `extension-unloaded` → `extension-loaded` ~2ms apart). In Chrome, reloading an extension also reloads any open tabs showing its pages, so the signup tab comes back under the new extension instance. In Electron it doesn't: the signup tab — still loading its multi-MB bundles when the reload hits — ends up committed into an **invalidated extension context**. Observed signature (confirmed via DevTools on the stuck tab): `chrome` exists with Chromium's native lazy getters for exactly the manifest's API namespaces (including `declarativeNetRequest`, which this library never injects — proving the getters are Chromium's), but **every getter returns `undefined`**, and this library's own injected namespaces are absent (the preload ran against a doomed context). The page's own feature check then throws `No runtime.connect support` and its loading screen spins forever. The popup meanwhile logs `Extension context invalidated` — Chromium's standard error for "my extension was reloaded out from under me" — which was the decisive clue.
+
+**Fixes (all library-level, Chrome-parity):**
+
+1. `src/browser/index.ts` (`listenForExtensions`): track `extension-unloaded` ids; when the same id fires `extension-loaded` again, reload every tracked tab whose URL is under that extension's origin. Repro-verified end-to-end: a fixture page that triggers `runtime.reload()` from its own background now auto-reloads and ends with a fully working `chrome` object. Spec: `spec/chrome-runtime-reload-spec.ts` + `spec/fixtures/runtime-reload/`.
+2. `src/browser/api/browser-action.ts`: destroy the action popup when its extension unloads (Chrome closes it; ours survived with an invalidated context that could never reconnect — the "popup stays open" half of the Dashlane report).
+3. `src/browser/api/tabs.ts` + `browser-action.ts`: close the popup when its own extension opens an active tab (`extension-created-tab` internal store event, destroy deferred 50ms so the `tabs.create` IPC reply reaches the popup first) — in Chrome the popup closes when focus moves to the new tab; ours only closed on window blur, which never fires when the tab renders inside the same shell window.
+
+**Superseded hypotheses from 2026-07-09** (all three disproven; their code was **removed** on 2026-07-10 after the real fix was user-confirmed — recorded so future sessions don't re-walk the same path):
+
+- ~~`externally_connectable` gap~~ — wrong: the signup page is an in-extension `chrome-extension://` tab, not dashlane.com; `runtime.connect` was missing because the *context was invalidated*, not because the capability doesn't exist for web pages. (Docs-only hypothesis, no code.)
+- ~~Idle-SW wake polling~~ (`popup.ts` polled `wakeExtensionServiceWorker()` every 20s while the popup was open) — the port disconnect it addressed was itself a *symptom* of the runtime.reload, and with the real fix the popup is destroyed on extension unload anyway. Removed; the pre-existing one-shot wake in `PopupView.load()` (from the 1Password work) stays — that one is load-bearing.
+- ~~`globalThis.chrome` write-back in `injectExtensionAPIs()`~~ (`renderer/index.ts`) — the "orphaned object" theory was wrong: Electron does populate `globalThis.chrome` in plain extension tabs (isolated-harness matrix proved all four load-order/sandbox combinations work, and the stuck page's `chrome` object was Chromium's own getter shell, not our fallback `{}`). Removed, restoring the upstream code path.
 
 ---
 
@@ -250,7 +329,7 @@ Implemented and covered by specs (`yarn test`):
 | `chrome.alarms` | Implemented in library | `chrome-alarms-spec.ts` |
 | `chrome.idle` | Implemented in library (powerMonitor) | `chrome-idle-spec.ts` |
 | `chrome.scripting` | Native (Electron) — verified | `chrome-scripting-spec.ts` |
-| `chrome.offscreen` | Implemented in library (hidden window) | `chrome-offscreen-spec.ts` |
+| `chrome.offscreen` | Implemented in library (hidden window + SW keep-alive, fixed 2026-07-11) | `chrome-offscreen-spec.ts` |
 | `chrome.management` get/getAll/getSelf | Implemented in library (native `getAll` hangs) | `chrome-management-spec.ts` |
 | `chrome.downloads` (basic) | Implemented in library | `chrome-downloads-spec.ts` |
 | `chrome.contextMenus.update` | Implemented in library | `chrome-contextMenus-spec.ts` |
@@ -258,8 +337,17 @@ Implemented and covered by specs (`yarn test`):
 | `chrome.sidePanel` | Safe renderer stubs (MV3) | — |
 | `chrome.fontSettings` | Safe renderer stubs | — |
 | `chrome.webRequest` | Native passthrough restored (dead override removed) | — |
+| `activeTab` permission | Electron never grants it — worked around via `patchActiveTabManifest` (§11) | `active-tab-patch-spec.ts` |
+| `chrome.events.Event` (`hasListener`/`hasListeners`/`getRules`/`addRules`/`removeRules`) | Fixed — no longer throw, match Chrome's behavior | `chrome-events-spec.ts` |
+| `patchModuleServiceWorker` (module SW registration) | Implemented in library, consumed by `electron-chrome-web-store` + Rambox | — (exercised manually; no automated repro of the underlying Electron bug) |
+| `wakeExtensionServiceWorker` (idle SW wake) | Implemented in library (`popup.ts` — one-shot on load, `api/tabs.ts`, `api/windows.ts`), consumed by `electron-chrome-web-store` + Rambox | — |
+| Tabs reload after extension reload (`chrome.runtime.reload()`) + popup closes on extension unload / on opening an active tab | Implemented in library (`browser/index.ts`, `api/browser-action.ts`, `api/tabs.ts`) — Chrome parity, fixes Dashlane account creation | `chrome-runtime-reload-spec.ts` |
+| `WebSocket` in MV3 service workers | Proxied through the main process (`api/websocket.ts`, `api/lib/websocket-connection.ts`, renderer `ProxyWebSocket` shim) — works around native SW WebSocket failing to connect in this Electron; `ws` is bundled into `dist`. Fixes Grammarly's inline checker (§9 Bug #2, WebSocket half) | `chrome-websocket-spec.ts` |
+| CSS `__MSG_@@extension_id__` i18n substitution | On-disk token rewrite at load (`patch/css-message-patch.ts`) — Electron doesn't substitute the message in served CSS, so asset URLs 404. Exported consumer helper `patchExtensionCssMessages`, invoked post-load. Fixes Grammarly's icons/underline SVGs (§9 Bug #1) | `css-message-patch-spec.ts` |
 
-**Latest full-suite audit (2026-07-08): 87 pass / 0 fail — fully green.**
+**Note (2026-07-14):** all Electron-workaround helpers were consolidated into `src/browser/patch/` (`active-tab-patch`, `module-service-worker-patch`, `service-worker-wake`, `css-message-patch`). Internal reorg only — package exports (bare `'electron-chrome-extensions'` specifier) are unchanged, so consumers need no import fix.
+
+**Latest full-suite audit (2026-07-15): 114 pass / 0 fail — fully green** (adds 2 `chrome-offscreen-spec.ts` tests for the SW keep-alive fix above). (An earlier 2026-07-14 run: 112 pass, adds `css-message-patch-spec.ts`. An earlier 2026-07-10 run failed 2 `contextMenus` specs with a transient "Preload file not found" module-resolution error mid-run; both passed 3/3 in isolation and the full re-run went green — environment flake, same class as the known-flaky list below.)
 
 Known **flaky** specs on Windows (failed in earlier runs — also on an untouched checkout — then passed on the audit run; environment-dependent, not deterministic):
 - `nativeMessaging sendNativeMessage()` ×2 — the spec builds/registers a native host binary; sensitive to environment state.
@@ -270,3 +358,5 @@ If these fail in a future run, verify against an untouched checkout before blami
 Notes:
 - The MV3 spec fixture (`spec/fixtures/rpc-mv3`) defines its main-world bridge via a `"world": "MAIN"` content script; MV2-style script-tag injection is unreliable in MV3 pages.
 - The rpc fixtures resolve promise-returning APIs in addition to callback-style APIs.
+- **Bug fixed during Tier 3 testing (2026-07-08):** pre-existing `WebNavigationAPI` crash — fast redirect chains (e.g. Google OAuth consent, surfaced by Boomerang) disposed a `WebFrameMain` between the navigation event and the handler touching it, throwing an uncaught "Render frame was disposed" in the main process. Every frame entry point in `web-navigation.ts` now checks `isLiveFrame()` (`frame && !frame.isDestroyed()`), and `getFrame`/`getAllFrames` filter disposed frames. Covered by the rapid-navigation smoke test in `chrome-webNavigation-spec.ts` (suite now 88 pass / 0 fail).
+- **Gap found during Tier 3 testing (2026-07-08), root-caused and fixed (2026-07-10):** Dashlane's in-popup "Crear una cuenta" (create account) button opens `chrome-extension://.../index.html#/signup` in a new tab, which hangs indefinitely — suspected in turn as an `externally_connectable` gap, an idle-service-worker-wake gap, and a `globalThis.chrome` injection bug; all three were wrong. Actual cause: the tab isn't reloaded when the extension reloads itself (`chrome.runtime.reload()` from Dashlane's `reloadOnLogout` task), leaving it on an invalidated context. See "Bugs found and fixed during Tier 3 testing (Dashlane, 2026-07-09 → 2026-07-10)" above for the full investigation. Spec: `chrome-runtime-reload-spec.ts`.

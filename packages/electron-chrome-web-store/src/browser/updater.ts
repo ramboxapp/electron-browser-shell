@@ -2,6 +2,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import debug from 'debug'
 import { app, powerMonitor, session as electronSession } from 'electron'
+import { patchModuleServiceWorker } from 'electron-chrome-extensions'
 
 import { compareVersions, fetch, getChromeVersion } from './utils'
 import { downloadExtensionFromURL } from './installer'
@@ -237,6 +238,7 @@ async function updateExtension(session: Electron.Session, update: ExtensionUpdat
   // Reload extension if already loaded
   if (sessionExtensions.getExtension(extensionId)) {
     sessionExtensions.removeExtension(extensionId)
+    await patchModuleServiceWorker(updatePath)
     await sessionExtensions.loadExtension(updatePath)
     d('loaded update %s@%s', extensionId, update.version)
   }

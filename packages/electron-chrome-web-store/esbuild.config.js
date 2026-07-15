@@ -3,7 +3,13 @@ const { createConfig, build, EXTERNAL_BASE } = require('../../build/esbuild/esbu
 
 console.log(`building ${packageJson.name}`)
 
-const external = [...EXTERNAL_BASE, 'adm-zip', 'pbf', 'electron-chrome-web-store/preload']
+const external = [
+  ...EXTERNAL_BASE,
+  'adm-zip',
+  'pbf',
+  'electron-chrome-extensions',
+  'electron-chrome-web-store/preload',
+]
 
 const esmOnlyModules = ['pbf']
 

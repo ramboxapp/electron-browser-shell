@@ -8,6 +8,7 @@ import { session as electronSession } from 'electron'
 import AdmZip from 'adm-zip'
 import debug from 'debug'
 import Pbf from 'pbf'
+import { patchModuleServiceWorker } from 'electron-chrome-extensions'
 
 import { readCrxFileHeader, readSignedData } from './crx3'
 import { convertHexadecimalToIDAlphabet, generateId } from './id'
@@ -229,6 +230,7 @@ export async function installExtension(
   const existingExtensionInfo = await findExtensionInstall(extensionId, extensionsPath)
   if (existingExtensionInfo && existingExtensionInfo.type === 'store') {
     d('%s already installed', extensionId)
+    await patchModuleServiceWorker(existingExtensionInfo.path)
     return await sessionExtensions.loadExtension(
       existingExtensionInfo.path,
       opts.loadExtensionOptions,
@@ -237,6 +239,7 @@ export async function installExtension(
 
   // Download and load new extension
   const extensionPath = await downloadExtension(extensionId, extensionsPath)
+  await patchModuleServiceWorker(extensionPath)
   const extension = await sessionExtensions.loadExtension(extensionPath, opts.loadExtensionOptions)
   d('installed %s', extensionId)
 

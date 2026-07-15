@@ -162,6 +162,20 @@ export const useExtensionBrowser = (opts: {
         return result
       },
 
+      /**
+       * Posts an arbitrary message payload to the fixture background/service
+       * worker and awaits its single 'success' reply. For scenarios the
+       * chrome[api][method] shape of exec() can't express (e.g. exercising a
+       * global like WebSocket).
+       */
+      async raw(payload: object) {
+        const p = emittedOnce(ipcMain, 'success')
+        const safeRpcStr = JSON.stringify(payload).replace(/'/g, "\\'")
+        await w.webContents.executeJavaScript(`exec('${safeRpcStr}')`)
+        const [, result] = await p
+        return result
+      },
+
       async eventOnce(eventName: string) {
         const p = emittedOnce(ipcMain, 'success')
         await w.webContents.executeJavaScript(
@@ -174,6 +188,20 @@ export const useExtensionBrowser = (opts: {
         }
 
         return results
+      },
+
+      /** Calls a method (hasListener, hasListeners, getRules, ...) on a named event object. */
+      async eventMethod(
+        eventName: string,
+        method: string,
+        ...args: any[]
+      ): Promise<{ ok: boolean; result?: any; error?: string }> {
+        const p = emittedOnce(ipcMain, 'success')
+        const rpcStr = JSON.stringify({ type: 'event-method', name: eventName, method, args })
+        const safeRpcStr = rpcStr.replace(/'/g, "\\'")
+        await w.webContents.executeJavaScript(`exec('${safeRpcStr}')`)
+        const [, result] = await p
+        return result
       },
     },
   }

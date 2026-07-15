@@ -1,6 +1,7 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import debug from 'debug'
+import { patchModuleServiceWorker, wakeExtensionServiceWorker } from 'electron-chrome-extensions'
 
 import { generateId } from './id'
 import { compareVersions } from './utils'
@@ -141,21 +142,20 @@ export async function loadAllExtensions(
           continue
         }
         d('loading extension %s', `${ext.id}@${ext.manifest.version}`)
+        await patchModuleServiceWorker(ext.path)
         extension = await sessionExtensions.loadExtension(ext.path)
       } else if (options.allowUnpacked) {
         d('loading unpacked extension %s', ext.path)
+        await patchModuleServiceWorker(ext.path)
         extension = await sessionExtensions.loadExtension(ext.path)
       }
 
-      if (
-        extension &&
-        extension.manifest.manifest_version === 3 &&
-        extension.manifest.background?.service_worker
-      ) {
-        const scope = `chrome-extension://${extension.id}`
-        await session.serviceWorkers.startWorkerForScope(scope).catch(() => {
-          console.error(`Failed to start worker for extension ${extension.id}`)
-        })
+      // A freshly loaded MV3 service worker can go idle before anything
+      // messages it, and this Electron build doesn't reliably wake it back
+      // up on demand (see service-worker-wake.ts in electron-chrome-extensions
+      // for the full explanation) — start it proactively instead.
+      if (extension) {
+        await wakeExtensionServiceWorker(session, extension.id)
       }
     } catch (error) {
       console.error(`Failed to load extension from ${ext.path}`)

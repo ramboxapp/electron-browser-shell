@@ -4,6 +4,9 @@ const sendIpc = ({ tabId, name }) => {
   chrome.tabs.sendMessage(tabId, { type: 'send-ipc', args: [name] })
 }
 
+// URLs observed by the webRequest coexistence probe (see webrequest-probe-*).
+const webRequestProbe = { observed: [] }
+
 const transformArgs = (args, sender) => {
   const tabId = sender.tab.id
 
@@ -72,6 +75,52 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
           event.removeListener(callback)
         })
       }
+
+      break
+    }
+
+    // P2.0 spike: registers a native chrome.webRequest.onBeforeRequest
+    // listener. With `blockPath` set it registers as a blocking listener and
+    // cancels matching URLs (requires webRequestBlocking, MV2-only).
+    case 'webrequest-probe-start': {
+      const { blockPath } = message
+      const extraInfo = blockPath ? ['blocking'] : []
+      chrome.webRequest.onBeforeRequest.addListener(
+        (details) => {
+          webRequestProbe.observed.push(details.url)
+          if (blockPath && details.url.includes(blockPath)) {
+            return { cancel: true }
+          }
+        },
+        { urls: ['<all_urls>'] },
+        extraInfo,
+      )
+      reply({ ok: true })
+      break
+    }
+
+    case 'webrequest-probe-results': {
+      reply({ observed: webRequestProbe.observed })
+      break
+    }
+
+    // Calls a chrome.events.Event method (hasListener, hasListeners,
+    // getRules, addRules, removeRules) directly, without a real callback
+    // function crossing the RPC boundary. Used to verify these don't throw.
+    case 'event-method': {
+      const { name, method, args } = message
+
+      const [apiName, eventName] = name.split('.')
+      const event = chrome[apiName] && chrome[apiName][eventName]
+
+      try {
+        const result = event && typeof event[method] === 'function' ? event[method](...(args || [])) : undefined
+        reply({ ok: true, result })
+      } catch (e) {
+        reply({ ok: false, error: String((e && e.message) || e) })
+      }
+
+      break
     }
   }
 

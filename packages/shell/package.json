@@ -17,7 +17,7 @@
   "dependencies": {
     "electron-chrome-context-menu": "^1.1.0",
     "electron-chrome-extensions": "npm:@ramboxapp/electron-chrome-extensions@^4.9.0",
-    "electron-chrome-web-store": "^0.10.0",
+    "electron-chrome-web-store": "^0.13.0",
     "electron-squirrel-startup": "^1.0.0"
   },
   "devDependencies": {

@@ -1,5 +1,5 @@
 import { ipcRenderer, contextBridge, webFrame } from 'electron'
-import { addExtensionListener, removeExtensionListener } from './event'
+import { addExtensionListener, removeExtensionListener, hasExtensionListeners } from './event'
 
 export const injectExtensionAPIs = () => {
   interface ExtensionMessageOptions {
@@ -81,12 +81,61 @@ export const injectExtensionAPIs = () => {
     invokeExtension(extensionId, 'runtime.disconnectNative', {}, connectionId)
   }
 
+  // WebSocket proxy bridge. Native WebSocket fails to connect from an MV3
+  // service worker in this Electron version (see the WebSocketAPI docs); the
+  // real socket is opened in the main process and its frames are relayed here.
+  interface WebSocketCallbacks {
+    onOpen: (payload: { protocol: string; extensions: string }) => void
+    onMessage: (payload: { data: string | Uint8Array; binary: boolean }) => void
+    onClose: (payload: { code: number; reason: string; wasClean: boolean }) => void
+    onError: () => void
+  }
+  const connectWebSocket = (
+    extensionId: string,
+    connectionId: string,
+    url: string,
+    protocols: string[],
+    callbacks: WebSocketCallbacks,
+  ) => {
+    const onOpen = (_e: Electron.IpcRendererEvent, payload: any) => callbacks.onOpen(payload)
+    const onMessage = (_e: Electron.IpcRendererEvent, payload: any) => callbacks.onMessage(payload)
+    const onClose = (_e: Electron.IpcRendererEvent, payload: any) => callbacks.onClose(payload)
+    const onError = () => callbacks.onError()
+    ipcRenderer.on(`crx-websocket-open-${connectionId}`, onOpen)
+    ipcRenderer.on(`crx-websocket-message-${connectionId}`, onMessage)
+    ipcRenderer.on(`crx-websocket-close-${connectionId}`, onClose)
+    ipcRenderer.on(`crx-websocket-error-${connectionId}`, onError)
+    invokeExtension(extensionId, 'websocket.connect', {}, connectionId, url, protocols)
+    // Disposer removes the per-connection listeners once the socket closes.
+    return () => {
+      ipcRenderer.off(`crx-websocket-open-${connectionId}`, onOpen)
+      ipcRenderer.off(`crx-websocket-message-${connectionId}`, onMessage)
+      ipcRenderer.off(`crx-websocket-close-${connectionId}`, onClose)
+      ipcRenderer.off(`crx-websocket-error-${connectionId}`, onError)
+    }
+  }
+  const sendWebSocketFrame = (connectionId: string, data: string | Uint8Array) => {
+    ipcRenderer.send(`crx-websocket-send-${connectionId}`, data)
+  }
+  const closeWebSocket = (
+    extensionId: string,
+    connectionId: string,
+    code?: number,
+    reason?: string,
+  ) => {
+    invokeExtension(extensionId, 'websocket.close', {}, connectionId, code, reason)
+  }
+
   const electronContext = {
     invokeExtension,
     addExtensionListener,
     removeExtensionListener,
+    hasExtensionListeners,
     connectNative,
     disconnectNative,
+    connectWebSocket,
+    sendWebSocketFrame,
+    closeWebSocket,
   }
 
   // Function body to run in the main world.
@@ -147,27 +196,41 @@ export const injectExtensionAPIs = () => {
         electron.removeExtensionListener(extensionId, this.name, callback)
       }
 
+      // Declarative event rules aren't implemented (no extension in the
+      // fleet needs them). Chrome never throws for these even when a given
+      // event doesn't support rules — it just reports none — so match that
+      // instead of throwing: 1Password's background threw an uncaught
+      // "Method not implemented." from one of these on every page load
+      // (2026-07-09), silently aborting whatever async flow it was guarding,
+      // including its first-run notification toast.
       getRules(callback: (rules: chrome.events.Rule[]) => void): void
       getRules(ruleIdentifiers: string[], callback: (rules: chrome.events.Rule[]) => void): void
       getRules(ruleIdentifiers: any, callback?: any) {
-        throw new Error('Method not implemented.')
+        const cb = typeof ruleIdentifiers === 'function' ? ruleIdentifiers : callback
+        if (cb) cb([])
       }
+      // Approximates whether *any* listener is registered for this event —
+      // not specifically `callback`, since callback identity isn't tracked
+      // across the IPC boundary (see hasExtensionListeners in event.ts).
+      // Good enough for the common "have I already registered?" guard, and
+      // — unlike throwing — doesn't crash the caller that relies on it.
       hasListener(callback: T): boolean {
-        throw new Error('Method not implemented.')
+        return electron.hasExtensionListeners(this.name)
       }
       removeRules(ruleIdentifiers?: string[] | undefined, callback?: (() => void) | undefined): void
       removeRules(callback?: (() => void) | undefined): void
       removeRules(ruleIdentifiers?: any, callback?: any) {
-        throw new Error('Method not implemented.')
+        const cb = typeof ruleIdentifiers === 'function' ? ruleIdentifiers : callback
+        if (cb) cb()
       }
       addRules(
         rules: chrome.events.Rule[],
         callback?: ((rules: chrome.events.Rule[]) => void) | undefined,
       ): void {
-        throw new Error('Method not implemented.')
+        if (callback) callback([])
       }
       hasListeners(): boolean {
-        throw new Error('Method not implemented.')
+        return electron.hasExtensionListeners(this.name)
       }
     }
 
@@ -245,6 +308,147 @@ export const injectExtensionAPIs = () => {
       onDisconnect: chrome.runtime.PortDisconnectEvent = new Event() as any
     }
 
+    // The DOM `Event` constructor, reached explicitly because mainWorldScript
+    // defines a local `Event` class (the chrome.events shim) that shadows it.
+    const NativeEvent = (globalThis as any).Event
+
+    /**
+     * Drop-in replacement for the global `WebSocket`, installed only in service
+     * workers (native WebSocket fails to connect there in this Electron — see
+     * WebSocketAPI). Implements the WHATWG interface but relays frames through
+     * the `electron` bridge to a real socket in the main process.
+     */
+    class ProxyWebSocket extends EventTarget {
+      static readonly CONNECTING = 0
+      static readonly OPEN = 1
+      static readonly CLOSING = 2
+      static readonly CLOSED = 3
+      readonly CONNECTING = 0
+      readonly OPEN = 1
+      readonly CLOSING = 2
+      readonly CLOSED = 3
+
+      url: string
+      readyState = 0
+      bufferedAmount = 0
+      extensions = ''
+      protocol = ''
+      binaryType: 'blob' | 'arraybuffer' = 'blob'
+
+      onopen: ((ev: any) => any) | null = null
+      onmessage: ((ev: MessageEvent) => any) | null = null
+      onerror: ((ev: any) => any) | null = null
+      onclose: ((ev: CloseEvent) => any) | null = null
+
+      private _id: string
+      private _dispose?: () => void
+
+      constructor(url: string, protocols?: string | string[]) {
+        super()
+
+        // WHATWG requires a synchronous throw on an invalid URL/scheme.
+        const resolved = new URL(url, (self as any).location?.href)
+        if (resolved.protocol !== 'ws:' && resolved.protocol !== 'wss:') {
+          throw new SyntaxError(
+            `Failed to construct 'WebSocket': The URL's scheme must be either 'ws' or 'wss'. '${resolved.protocol}' is not allowed.`,
+          )
+        }
+
+        this.url = resolved.href
+        this._id = (crypto as any).randomUUID()
+        const protocolList = typeof protocols === 'string' ? [protocols] : protocols || []
+
+        this._dispose = electron.connectWebSocket(extensionId, this._id, this.url, protocolList, {
+          onOpen: (payload) => {
+            this.readyState = 1
+            this.protocol = payload.protocol || ''
+            this.extensions = payload.extensions || ''
+            this._fire('open', new NativeEvent('open'))
+          },
+          onMessage: (payload) => {
+            let data: any
+            if (payload.binary) {
+              const bytes = payload.data as Uint8Array
+              const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+              data = this.binaryType === 'arraybuffer' ? ab : new Blob([ab])
+            } else {
+              data = payload.data
+            }
+            this._fire('message', new MessageEvent('message', { data }))
+          },
+          onClose: (payload) => {
+            this.readyState = 3
+            this._teardown()
+            this._fire(
+              'close',
+              new CloseEvent('close', {
+                code: payload.code,
+                reason: payload.reason,
+                wasClean: payload.wasClean,
+              }),
+            )
+          },
+          onError: () => {
+            this._fire('error', new NativeEvent('error'))
+          },
+        })
+      }
+
+      send(data: string | ArrayBufferLike | ArrayBufferView | Blob) {
+        if (this.readyState === 0) {
+          throw new DOMException(
+            "Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.",
+            'InvalidStateError',
+          )
+        }
+        if (this.readyState !== 1) return
+
+        if (typeof data === 'string') {
+          electron.sendWebSocketFrame(this._id, data)
+        } else if (data instanceof Blob) {
+          // Blob has no sync bytes; send once resolved (ordering caveat, but
+          // extensions overwhelmingly send strings or typed arrays).
+          data.arrayBuffer().then((ab) => {
+            if (this.readyState === 1) electron.sendWebSocketFrame(this._id, new Uint8Array(ab))
+          })
+        } else if (data instanceof ArrayBuffer) {
+          electron.sendWebSocketFrame(this._id, new Uint8Array(data))
+        } else if (ArrayBuffer.isView(data)) {
+          electron.sendWebSocketFrame(
+            this._id,
+            new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+          )
+        } else {
+          electron.sendWebSocketFrame(this._id, String(data))
+        }
+      }
+
+      close(code?: number, reason?: string) {
+        if (this.readyState === 2 || this.readyState === 3) return
+        this.readyState = 2
+        electron.closeWebSocket(extensionId, this._id, code, reason)
+      }
+
+      private _teardown() {
+        if (this._dispose) {
+          this._dispose()
+          this._dispose = undefined
+        }
+      }
+
+      private _fire(type: string, event: any) {
+        const handler = (this as any)['on' + type]
+        if (typeof handler === 'function') {
+          try {
+            handler.call(this, event)
+          } catch (error) {
+            console.error(error)
+          }
+        }
+        this.dispatchEvent(event)
+      }
+    }
+
     type DeepPartial<T> = {
       [P in keyof T]?: DeepPartial<T[P]>
     }
@@ -256,6 +460,56 @@ export const injectExtensionAPIs = () => {
           base: DeepPartial<(typeof chrome)[apiName]>,
         ) => DeepPartial<(typeof chrome)[apiName]>
       }
+    }
+
+    /**
+     * Synchronous cache of active tab ids across windows. Needed to patch
+     * MessageSender.tab.active at event dispatch time — an async lookup is
+     * not possible there because onMessage listeners must run synchronously
+     * to preserve their `return true` (async response) contract.
+     */
+    const activeTabCache = {
+      // Flat set of every active tab id, for O(1) lookups in patchSenderTab.
+      ids: new Set<number>(),
+      // windowId -> tabId, so activation in one window doesn't clear another's.
+      byWindow: new Map<number, number>(),
+      initialized: false,
+      // Lazily initialized on first onMessage/onConnect subscription to avoid
+      // registering tab listeners for extensions that never receive messages.
+      init() {
+        if (this.initialized) return
+        this.initialized = true
+        // Replaces the previously-active tab for a window with the new one,
+        // keeping both `ids` and `byWindow` in sync.
+        const setActive = (windowId: number, tabId: number) => {
+          const previous = this.byWindow.get(windowId)
+          if (typeof previous === 'number') this.ids.delete(previous)
+          this.byWindow.set(windowId, tabId)
+          this.ids.add(tabId)
+        }
+        try {
+          // Keep the cache current as the user switches tabs.
+          electron.addExtensionListener(
+            extensionId,
+            'tabs.onActivated',
+            (info: chrome.tabs.TabActiveInfo) => {
+              setActive(info.windowId, info.tabId)
+            },
+          )
+          // Seed with the currently active tabs (one per window) so messages
+          // that arrive before any onActivated event still resolve correctly.
+          electron.invokeExtension(extensionId, 'tabs.query', {}, { active: true }).then(
+            (tabs: chrome.tabs.Tab[]) => {
+              tabs?.forEach((tab) => {
+                if (typeof tab.id === 'number') setActive(tab.windowId, tab.id)
+              })
+            },
+            () => {},
+          )
+        } catch {
+          // Ignore setup failures; sender.tab will just keep native values.
+        }
+      },
     }
 
     const browserActionFactory = (base: DeepPartial<typeof globalThis.chrome.browserAction>) => {
@@ -484,7 +738,10 @@ export const injectExtensionAPIs = () => {
             clearDefaultFontSize: localStub(),
             clearFont: localStub(),
             clearMinimumFontSize: localStub(),
-            getDefaultFixedFontSize: localStub({ pixelSize: 13, levelOfControl: 'not_controllable' }),
+            getDefaultFixedFontSize: localStub({
+              pixelSize: 13,
+              levelOfControl: 'not_controllable',
+            }),
             getDefaultFontSize: localStub({ pixelSize: 16, levelOfControl: 'not_controllable' }),
             getFont: localStub({ fontId: '', levelOfControl: 'not_controllable' }),
             getFontList: localStub(genericFontList),
@@ -646,8 +903,70 @@ export const injectExtensionAPIs = () => {
 
       runtime: {
         factory: (base) => {
+          // Electron natively fills MessageSender.tab with hardcoded
+          // active/highlighted=false since it has no tab model. Extensions
+          // (e.g. password managers) rely on sender.tab.active to decide
+          // whether to analyze/autofill a page, so we patch those fields
+          // using the library's tab state. See activeTabCache below.
+          const patchSenderTab = (sender?: chrome.runtime.MessageSender) => {
+            const tab = sender?.tab
+            // Only override when we positively know this tab is active; leave
+            // the native (false) values untouched otherwise.
+            if (tab && typeof tab.id === 'number' && activeTabCache.ids.has(tab.id)) {
+              tab.active = true
+              tab.highlighted = true
+            }
+            return sender
+          }
+
+          // Wraps a native event so listener args can be transformed before
+          // dispatch. A WeakMap preserves removeListener identity semantics.
+          const wrapSenderEvent = <T extends Function>(
+            event: chrome.events.Event<T> | undefined,
+            transform: (args: any[]) => void,
+          ) => {
+            // Nothing to wrap (e.g. API missing in this context) — pass through.
+            if (!event?.addListener) return event
+            // Maps the caller's original callback to our wrapper, so
+            // removeListener/hasListener can resolve back to the wrapper.
+            const wrappers = new WeakMap<Function, Function>()
+            const originalAdd = event.addListener.bind(event)
+            const originalRemove = event.removeListener.bind(event)
+            // Inherit from the native event so any untouched members (getRules,
+            // etc.) keep working via the prototype chain.
+            return Object.assign(Object.create(event), {
+              addListener: (callback: Function, ...rest: any[]) => {
+                // First subscription is the trigger to start tracking tabs.
+                activeTabCache.init()
+                const wrapped = (...args: any[]) => {
+                  transform(args)
+                  // Preserve the return value; returning true keeps the
+                  // sendResponse port open for async replies.
+                  return callback(...args)
+                }
+                wrappers.set(callback, wrapped)
+                return (originalAdd as any)(wrapped, ...rest)
+              },
+              removeListener: (callback: Function) => {
+                // Fall back to the raw callback in case it was never wrapped.
+                originalRemove((wrappers.get(callback) as any) ?? callback)
+                wrappers.delete(callback)
+              },
+              hasListener: (callback: Function) =>
+                (event.hasListener as any)?.((wrappers.get(callback) as any) ?? callback),
+            })
+          }
+
           return {
             ...base,
+            // onMessage signature is (message, sender, sendResponse) — patch arg[1].
+            onMessage: wrapSenderEvent(base.onMessage as any, (args) => {
+              patchSenderTab(args[1])
+            }),
+            // onConnect signature is (port) — the sender lives on the port.
+            onConnect: wrapSenderEvent(base.onConnect as any, (args) => {
+              patchSenderTab(args[0]?.sender)
+            }),
             connectNative: (application: string) => {
               const port = new NativePort()
               const receive = port._receive.bind(port)
@@ -809,6 +1128,50 @@ export const injectExtensionAPIs = () => {
         configurable: true,
       })
     })
+
+    // Seed the active tab cache eagerly in extension contexts so early
+    // incoming messages (e.g. content scripts connecting on page load) get a
+    // correct sender.tab.active value.
+    if (extensionId) activeTabCache.init()
+
+    // Replace the broken native WebSocket in service-worker contexts only.
+    // Pages keep the working native implementation. ProxyWebSocket closes over
+    // `electron`, so it keeps working after the global reference is removed
+    // below.
+    const isServiceWorker =
+      typeof (self as any).ServiceWorkerGlobalScope !== 'undefined' &&
+      (self as any) instanceof (self as any).ServiceWorkerGlobalScope
+    if (isServiceWorker && extensionId) {
+      try {
+        ;(globalThis as any).WebSocket = ProxyWebSocket
+      } catch (error) {
+        console.error('Failed to install WebSocket proxy', error)
+      }
+    }
+
+    // Enable manifest-declared static declarativeNetRequest rulesets. Electron
+    // 42's native DNR engine parses and enforces static rulesets but does NOT
+    // honor their manifest `"enabled": true` flag at load — leaving them
+    // disabled (getEnabledRulesets() returns []). Calling updateEnabledRulesets
+    // once at service-worker startup activates them, matching Chrome's default.
+    // Dynamic and session rules already work natively and need no help here.
+    if (isServiceWorker && extensionId) {
+      const dnr = (chrome as any).declarativeNetRequest
+      const rulesets: any[] = (manifest as any).declarative_net_request?.rule_resources || []
+      const enabledIds = rulesets
+        .filter((r) => r && r.enabled !== false && typeof r.id === 'string')
+        .map((r) => r.id)
+      if (dnr?.updateEnabledRulesets && enabledIds.length > 0) {
+        try {
+          // Fire-and-forget: startup enablement, errors are non-fatal.
+          Promise.resolve(dnr.updateEnabledRulesets({ enableRulesetIds: enabledIds })).catch(
+            (error: unknown) => console.error('Failed to enable static DNR rulesets', error),
+          )
+        } catch (error) {
+          console.error('Failed to enable static DNR rulesets', error)
+        }
+      }
+    }
 
     // Remove access to internals
     delete (globalThis as any).electron

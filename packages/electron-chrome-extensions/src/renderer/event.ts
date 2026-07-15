@@ -22,6 +22,17 @@ export const addExtensionListener = (extensionId: string, name: string, callback
   })
 }
 
+/**
+ * Whether any listener is currently registered for the given event name.
+ * Only tracks a count per name, not specific callback identity, so this is
+ * an approximation of chrome.events.Event#hasListener/#hasListeners (which
+ * check a specific callback) — good enough to answer "is anyone listening"
+ * without crossing the IPC boundary to inspect actual callback references.
+ */
+export const hasExtensionListeners = (name: string): boolean => {
+  return (listenerMap.get(name) || 0) > 0
+}
+
 export const removeExtensionListener = (extensionId: string, name: string, callback: any) => {
   if (listenerMap.has(name)) {
     const listenerCount = listenerMap.get(name) || 0

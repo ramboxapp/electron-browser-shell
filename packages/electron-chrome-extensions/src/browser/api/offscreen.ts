@@ -68,6 +68,22 @@ export class OffscreenAPI {
 
     this.documents.set(extension.id, win)
 
+    // MV3 service workers can be recycled by Electron while awaiting a reply
+    // from an offscreen document they just created, since nothing else
+    // signals that the SW is still "doing work" during that async gap. That
+    // leaves the offscreen document waiting forever for a reply from a
+    // service worker that no longer exists (observed via Keeper's popup
+    // hanging on "Decrypting your Vault data..." indefinitely). Pin the
+    // calling SW alive for the offscreen document's full lifetime, ended via
+    // the window's own 'destroyed' event so every teardown path (explicit
+    // closeDocument, extension-unloaded, or an unexpected crash) is covered
+    // by a single source of truth. This matches Chrome's own behavior, where
+    // an open offscreen document keeps its extension's service worker alive.
+    if (event.type === 'service-worker' && !event.sender.isDestroyed()) {
+      const task = event.sender.startTask()
+      win.webContents.once('destroyed', () => task.end())
+    }
+
     d(`creating offscreen document for ${extension.id} [url:${url}]`)
 
     try {

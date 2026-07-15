@@ -331,6 +331,33 @@ export class ContextMenusAPI {
     this.menus.delete(extension.id)
   }
 
+  /**
+   * Resolves the chrome frameId of the frame the context menu was invoked in.
+   *
+   * Chrome reports the real frameId here (0 for the top frame). Extensions like
+   * Bitwarden key their collected page details by frameId and fill using
+   * `info.frameId`, so returning -1 made context-menu autofill target a
+   * non-existent frame and silently do nothing. The scheme mirrors
+   * web-navigation's getFrameId (and Electron's native MessageSender.frameId)
+   * so the id matches what content scripts report.
+   */
+  private getClickedFrameId(
+    webContents: Electron.WebContents,
+    params?: Electron.ContextMenuParams,
+  ): number {
+    // No frame info, or the click was in the top document.
+    if (!params?.frameURL || params.frameURL === params.pageURL) return 0
+    try {
+      const frame = webContents.mainFrame.framesInSubtree.find(
+        (f) => !f.isDestroyed() && f.url === params.frameURL,
+      )
+      if (frame) return frame === frame.top ? 0 : frame.frameTreeNodeId
+    } catch {
+      // Frame tree may be unavailable (e.g. destroyed); fall back to top frame.
+    }
+    return 0
+  }
+
   private onClicked(
     extensionId: string,
     menuItemId: string,
@@ -345,11 +372,16 @@ export class ContextMenusAPI {
       return
     }
 
+    // Report the real parent menu id so extensions can distinguish which
+    // submenu an item was clicked in (Bitwarden uses this to pick the Identity
+    // vs. Card autofill flow). Chrome omits it for top-level items.
+    const parentMenuItemId = this.menus.get(extensionId)?.get(menuItemId)?.parentId
+
     const data: chrome.contextMenus.OnClickData = {
       selectionText: params?.selectionText,
       checked: false, // TODO
       menuItemId,
-      frameId: -1, // TODO: match frameURL with webFrameMain in Electron 12
+      frameId: this.getClickedFrameId(webContents, params),
       frameUrl: params?.frameURL,
       editable: params?.isEditable || false,
       // TODO(mv3): limit possible string enums
@@ -357,7 +389,7 @@ export class ContextMenusAPI {
       wasChecked: false, // TODO
       pageUrl: params?.pageURL as any, // types are inaccurate
       linkUrl: params?.linkURL,
-      parentMenuItemId: -1, // TODO
+      parentMenuItemId: parentMenuItemId as any,
       srcUrl: params?.srcURL,
     }
 

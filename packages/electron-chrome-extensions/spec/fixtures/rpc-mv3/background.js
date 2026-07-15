@@ -70,6 +70,35 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
           event.removeListener(callback)
         })
       }
+      break
+    }
+
+    // Exercises the WebSocket proxy from a real MV3 service worker: open a
+    // socket, receive an unsolicited text frame, request + receive a binary
+    // frame, then close. Replies with an ordered log of what happened.
+    case 'websocket-test': {
+      const { url } = message
+      const got = []
+      const ws = new WebSocket(url)
+      ws.binaryType = 'arraybuffer'
+      ws.onopen = () => {
+        got.push('open')
+        ws.send('want-binary')
+      }
+      ws.onmessage = (e) => {
+        if (typeof e.data === 'string') {
+          got.push('text:' + e.data)
+        } else if (e.data instanceof ArrayBuffer) {
+          got.push('binary:' + new Uint8Array(e.data).join(','))
+          ws.close(3001, 'done')
+        }
+      }
+      ws.onerror = () => got.push('error')
+      ws.onclose = (e) => {
+        got.push('close:' + e.code + ':' + e.wasClean)
+        reply(got)
+      }
+      break
     }
   }
 

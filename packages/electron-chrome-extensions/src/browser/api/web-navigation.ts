@@ -10,6 +10,15 @@ type DocumentLifecycle = 'prerender' | 'active' | 'cached' | 'pending_deletion'
 const getFrame = (frameProcessId: number, frameRoutingId: number) =>
   electron.webFrameMain.fromId(frameProcessId, frameRoutingId)
 
+// Any property access on a disposed WebFrameMain throws ("Render frame was
+// disposed before WebFrameMain could be accessed"). Fast redirect chains
+// (e.g. OAuth consent flows) can dispose a frame between the navigation
+// event that references it and our handlers running, so every entry point
+// must check liveness before touching the frame.
+const isLiveFrame = (
+  frame: Electron.WebFrameMain | null | undefined,
+): frame is Electron.WebFrameMain => Boolean(frame && !frame.isDestroyed())
+
 const getFrameId = (frame: Electron.WebFrameMain) =>
   frame === frame.top ? 0 : frame.frameTreeNodeId
 
@@ -85,7 +94,7 @@ export class WebNavigationAPI {
 
     if (typeof details.frameId === 'number') {
       const mainFrame = tab.mainFrame
-      targetFrame = mainFrame.framesInSubtree.find((frame: any) => {
+      targetFrame = mainFrame.framesInSubtree.filter(isLiveFrame).find((frame: any) => {
         const isMainFrame = frame === frame.top
         return isMainFrame ? details.frameId === 0 : details.frameId === frame.frameTreeNodeId
       })
@@ -100,7 +109,7 @@ export class WebNavigationAPI {
   ): chrome.webNavigation.GetAllFrameResultDetails[] | null {
     const tab = this.ctx.store.getTabById(details.tabId)
     if (!tab || !('mainFrame' in tab)) return []
-    return (tab as any).mainFrame.framesInSubtree.map(getFrameDetails)
+    return (tab as any).mainFrame.framesInSubtree.filter(isLiveFrame).map(getFrameDetails)
   }
 
   private sendNavigationEvent = (eventName: string, details: { url: string }) => {
@@ -112,7 +121,7 @@ export class WebNavigationAPI {
     tab: Electron.WebContents,
     { url, frame }: Electron.Event<Electron.WebContentsWillNavigateEventParams>,
   ) => {
-    if (!frame) return
+    if (!isLiveFrame(frame)) return
 
     const details: chrome.webNavigation.WebNavigationSourceCallbackDetails = {
       sourceTabId: tab.id,
@@ -134,7 +143,7 @@ export class WebNavigationAPI {
     }: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>,
   ) => {
     if (isSameDocument) return
-    if (!frame) return
+    if (!isLiveFrame(frame)) return
 
     const details: chrome.webNavigation.WebNavigationParentedCallbackDetails = {
       frameId: getFrameId(frame),
@@ -161,7 +170,7 @@ export class WebNavigationAPI {
     frameRoutingId: number,
   ) => {
     const frame = getFrame(frameProcessId, frameRoutingId)
-    if (!frame) return
+    if (!isLiveFrame(frame)) return
 
     const details: chrome.webNavigation.WebNavigationTransitionCallbackDetails = {
       frameId: getFrameId(frame),
@@ -190,7 +199,7 @@ export class WebNavigationAPI {
     frameRoutingId: number,
   ) => {
     const frame = getFrame(frameProcessId, frameRoutingId)
-    if (!frame) return
+    if (!isLiveFrame(frame)) return
 
     const details: chrome.webNavigation.WebNavigationTransitionCallbackDetails & {
       parentFrameId: number
@@ -210,6 +219,8 @@ export class WebNavigationAPI {
   }
 
   private onDOMContentLoaded = (tab: Electron.WebContents, frame: Electron.WebFrameMain) => {
+    if (!isLiveFrame(frame)) return
+
     const details: chrome.webNavigation.WebNavigationParentedCallbackDetails = {
       frameId: getFrameId(frame),
       parentFrameId: getParentFrameId(frame),
@@ -235,7 +246,7 @@ export class WebNavigationAPI {
     frameRoutingId: number,
   ) => {
     const frame = getFrame(frameProcessId, frameRoutingId)
-    if (!frame) return
+    if (!isLiveFrame(frame)) return
 
     const url = tab.getURL()
     const details: chrome.webNavigation.WebNavigationParentedCallbackDetails = {

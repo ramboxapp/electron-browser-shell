@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { BrowserWindow, Session } from 'electron'
 import { getAllWindows } from './api/common'
+import { wakeExtensionServiceWorker } from './patch/service-worker-wake'
 import debug from 'debug'
 
 const d = debug('electron-chrome-extensions:popup')
@@ -109,17 +110,10 @@ export class PopupView extends EventEmitter {
   private async load(url: string): Promise<void> {
     const win = this.browserWindow!
 
-    // Some Electron builds don't reliably wake an idle extension service
-    // worker in response to messages sent from a freshly-opened popup, which
-    // leaves the popup's script hanging on its first request. Explicitly
-    // starting the worker for this extension's scope before the popup's own
-    // page begins loading avoids that race.
-    try {
-      const scope = `chrome-extension://${this.extensionId}/`
-      await (this.session as any).serviceWorkers?.startWorkerForScope?.(scope)
-    } catch (e) {
-      d('failed to start service worker for popup scope', e)
-    }
+    // See service-worker-wake.ts: the popup's first message to the
+    // extension's service worker can hang if the worker went idle, so wake
+    // it before the popup's own page begins loading.
+    await wakeExtensionServiceWorker(this.session, this.extensionId)
 
     try {
       await win.webContents.loadURL(url)

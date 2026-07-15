@@ -2,6 +2,7 @@ import { ExtensionContext } from '../context'
 import { ExtensionEvent } from '../router'
 import { getAllWindows, matchesPattern, matchesTitlePattern, TabContents } from './common'
 import { WindowsAPI } from './windows'
+import { wakeExtensionServiceWorker } from '../patch/service-worker-wake'
 import debug from 'debug'
 
 const d = debug('electron-chrome-extensions:tabs')
@@ -48,15 +49,13 @@ export class TabsAPI {
   private observeTab(tab: TabContents) {
     const tabId = tab.id
 
+    // Tab-level events that already only fire for the top-level document.
     const updateEvents = [
       'page-title-updated', // title
       'did-start-loading', // status
       'did-stop-loading', // status
       'media-started-playing', // audible
       'media-paused', // audible
-      'did-start-navigation', // url
-      'did-redirect-navigation', // url
-      'did-navigate-in-page', // url
 
       // Listen for 'tab-updated' to handle all other cases which don't have
       // an official Electron API such as discarded tabs. App developers can
@@ -65,12 +64,34 @@ export class TabsAPI {
       'tab-updated',
     ]
 
+    // Navigation events fire once per frame, including subframes. Chrome's
+    // chrome.tabs.onUpdated only reflects top-level navigations, so ignore
+    // subframe navigations here. Otherwise pages with busy iframes (ads,
+    // trackers) emit a storm of onUpdated events — enough to prevent
+    // extensions like Bitwarden from finishing an async context-menu rebuild
+    // before the next event tears it down.
+    const navigationEvents = [
+      'did-start-navigation', // url
+      'did-redirect-navigation', // url
+      'did-navigate-in-page', // url
+    ]
+
     const updateHandler = () => {
+      this.onUpdated(tabId)
+    }
+
+    const navigationHandler = (event: Electron.Event & { frame?: Electron.WebFrameMain }) => {
+      // Only the top frame maps to the tab's own navigation state.
+      const frame = event?.frame
+      if (frame && !frame.isDestroyed() && frame !== frame.top) return
       this.onUpdated(tabId)
     }
 
     updateEvents.forEach((eventName) => {
       tab.on(eventName as any, updateHandler)
+    })
+    navigationEvents.forEach((eventName) => {
+      tab.on(eventName as any, navigationHandler)
     })
 
     const faviconHandler = (event: Electron.Event, favicons: string[]) => {
@@ -82,6 +103,9 @@ export class TabsAPI {
     tab.once('destroyed', () => {
       updateEvents.forEach((eventName) => {
         tab.off(eventName as any, updateHandler)
+      })
+      navigationEvents.forEach((eventName) => {
+        tab.off(eventName as any, navigationHandler)
       })
       tab.off('page-favicon-updated', faviconHandler)
 
@@ -110,7 +134,10 @@ export class TabsAPI {
       favIconUrl: tab.favicon || undefined,
       frozen: false,
       height,
-      highlighted: false,
+      // Chrome reports the active tab as highlighted. Some extensions (e.g.
+      // password managers) gate their behavior on `highlighted || active`, so
+      // leaving this hardcoded to false made them treat every tab as inactive.
+      highlighted: activeTab?.id === tabId,
       id: tabId,
       incognito: false,
       index: -1, // TODO
@@ -169,18 +196,24 @@ export class TabsAPI {
 
   private async create(event: ExtensionEvent, details: chrome.tabs.CreateProperties = {}) {
     const url = details.url ? validateExtensionUrl(details.url, event.extension) : undefined
+    // See service-worker-wake.ts: the new tab's page is likely to message
+    // this extension shortly after loading, which can hang if its service
+    // worker went idle — wake it before the consumer's createTab() runs.
+    await wakeExtensionServiceWorker(this.ctx.session, event.extension.id)
     const tab = await this.ctx.store.createTab({ ...details, url })
     const tabDetails = this.getTabDetails(tab)
     if (details.active) {
       queueMicrotask(() => this.onActivated(tab.id))
     }
+    // Consumed by BrowserActionAPI to close the extension's popup, matching
+    // Chrome's behavior when a popup opens a focused tab.
+    this.ctx.store.emit('extension-created-tab', event.extension.id, details.active !== false)
     return tabDetails
   }
 
   private async captureVisibleTab(event: ExtensionEvent, arg1?: unknown, arg2?: unknown) {
     // The signature is overloaded: captureVisibleTab(windowId?, options?).
-    const windowId: number =
-      typeof arg1 === 'number' ? arg1 : TabsAPI.WINDOW_ID_CURRENT
+    const windowId: number = typeof arg1 === 'number' ? arg1 : TabsAPI.WINDOW_ID_CURRENT
     const options: chrome.tabs.CaptureVisibleTabOptions =
       (typeof arg1 === 'object' ? arg1 : typeof arg2 === 'object' ? arg2 : {}) || {}
 

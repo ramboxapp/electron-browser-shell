@@ -1,5 +1,6 @@
 import { ExtensionContext } from '../context'
 import { ExtensionEvent } from '../router'
+import { wakeExtensionServiceWorker } from '../patch/service-worker-wake'
 import debug from 'debug'
 
 const d = debug('electron-chrome-extensions:windows')
@@ -109,6 +110,10 @@ export class WindowsAPI {
   }
 
   private async create(event: ExtensionEvent, details: chrome.windows.CreateData) {
+    // See service-worker-wake.ts: the new window's page is likely to message
+    // this extension shortly after loading, which can hang if its service
+    // worker went idle — wake it before the consumer's createWindow() runs.
+    await wakeExtensionServiceWorker(this.ctx.session, event.extension.id)
     const win = await this.ctx.store.createWindow(event, details)
     return this.getWindowDetails(win)
   }

@@ -26,6 +26,7 @@ import { ExtensionRouter } from './router'
 import { checkLicense, License } from './license'
 import { readLoadedExtensionManifest } from './manifest'
 import { PermissionsAPI } from './api/permissions'
+import { WebSocketAPI } from './api/websocket'
 import { resolvePartition } from './partition'
 
 function checkVersion() {
@@ -142,6 +143,7 @@ export class ElectronChromeExtensions extends EventEmitter {
     runtime: RuntimeAPI
     tabs: TabsAPI
     webNavigation: WebNavigationAPI
+    webSocket: WebSocketAPI
     windows: WindowsAPI
   }
 
@@ -185,6 +187,7 @@ export class ElectronChromeExtensions extends EventEmitter {
       runtime: new RuntimeAPI(this.ctx),
       tabs: new TabsAPI(this.ctx),
       webNavigation: new WebNavigationAPI(this.ctx),
+      webSocket: new WebSocketAPI(this.ctx),
       windows: new WindowsAPI(this.ctx),
     }
 
@@ -194,8 +197,39 @@ export class ElectronChromeExtensions extends EventEmitter {
 
   private listenForExtensions() {
     const sessionExtensions = this.ctx.session.extensions || this.ctx.session
+
+    // This library plus its consumers legitimately attach a dozen or so
+    // listeners to session.extensions (one per API module), which trips
+    // EventEmitter's default limit of 10 and logs a spurious leak warning.
+    sessionExtensions.setMaxListeners?.(100)
+
+    // Chrome reloads any open tabs showing an extension's pages when that
+    // extension is reloaded — via chrome.runtime.reload(), an unpacked
+    // reload, or an update. Electron doesn't: the old document survives with
+    // an invalidated extension context (every native chrome.* getter returns
+    // undefined), and a page that is still loading when the reload hits
+    // commits into that dead context with no working chrome APIs at all.
+    // This happens in practice: Dashlane's account-creation flow logs out
+    // first, its "reloadOnLogout" background task calls
+    // chrome.runtime.reload(), and the signup tab it just opened hangs
+    // forever on its loading screen (diagnosed 2026-07-09). Track unloads
+    // and reload the extension's tabs once it finishes loading again.
+    const unloadedExtensionIds = new Set<string>()
+
+    sessionExtensions.addListener('extension-unloaded', (_event, extension) => {
+      unloadedExtensionIds.add(extension.id)
+    })
+
     sessionExtensions.addListener('extension-loaded', (_event, extension) => {
       readLoadedExtensionManifest(this.ctx, extension)
+
+      if (unloadedExtensionIds.delete(extension.id)) {
+        for (const tab of this.ctx.store.tabs) {
+          if (!tab.isDestroyed() && tab.getURL().startsWith(extension.url)) {
+            tab.reload()
+          }
+        }
+      }
     })
   }
 
