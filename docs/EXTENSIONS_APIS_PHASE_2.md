@@ -2,6 +2,43 @@
 
 Companion to [EXTENSIONS_APIS.md](./EXTENSIONS_APIS.md) (its "Phase 2" section) and [EXTENSIONS_API_MANUAL_TEST.md](./EXTENSIONS_API_MANUAL_TEST.md) (whose Tier 3 results re-prioritized this phase). Written 2026-07-15.
 
+---
+
+## ✅ SPIKE RESULTS + DNR SHIPPED (2026-07-15) — read this first
+
+The P2.0 spike ran real probes against Electron 42's native DNR (fixture `spec/fixtures/dnr`, specs `chrome-declarativeNetRequest-spec.ts` / `chrome-webRequest-spec.ts`). Findings **collapsed the DNR scope from "build a rule engine" (P2.1 below) to a one-line startup workaround**, making that speculative design obsolete. Kept below for provenance/history only — do not implement it.
+
+**What the spike found:**
+
+| Probe | Result |
+|---|---|
+| `chrome.declarativeNetRequest` present natively? | **Yes** — `updateDynamicRules`, `getDynamicRules`, `updateSessionRules`, `updateEnabledRulesets`, `getEnabledRulesets`, `isRegexSupported` all present (only `onRuleMatchedDebug` missing) |
+| Dynamic rules store/retrieve/**enforce**? | **Yes, fully** — a dynamic block rule actually blocks the request (native engine, no library code) |
+| Session rules **enforce**? | **Yes** — same native engine |
+| Manifest static rulesets enforce at load? | **No** — `getEnabledRulesets()` returns `[]`; Electron parses the ruleset but ignores its `"enabled": true` manifest flag |
+| Static ruleset after explicit `updateEnabledRulesets({enableRulesetIds})`? | **Enforces** — so the only real gap is the missing auto-enable at startup |
+| App-level `session.webRequest` + extension `chrome.webRequest` coexist? | **No** — the app-level listener **clobbers** the extension's (single-listener-per-event in Electron). Confirmed via `chrome-webRequest-spec.ts`'s coexistence test |
+
+**Consequence for the webRequest question:** since the app-level hook would clobber every extension's own `chrome.webRequest` (Bitwarden/KeePassXC's `webRequestAuthProvider`, Dashlane's/DeepL's `webRequest`, etc.), **DNR must not be built on `session.webRequest`** — and since the native DNR engine already enforces without needing that hook, this isn't a tradeoff, just the correct approach. The P2.1 design below (matcher + `session.webRequest` hookup) is void for this reason alone, independent of the scope-shrinkage above.
+
+**Fleet impact:** Dashlane and HubSpot (dynamic-rules-only, per the manifest scan) **needed zero code** — native dynamic rules already worked. DeepL's 1 static rule and uBlock Origin Lite's static blocklists needed only the auto-enable fix below. uBO Lite's perf-risk gate (P2.1's "uBlock Origin Lite gate" section) **evaporates** — its rules run on Electron's native flatbuffer engine, not hand-rolled JS matching.
+
+**The fix (shipped):** `src/renderer/index.ts`, in the service-worker startup path (same `isServiceWorker` gate as the WebSocket proxy install): read `manifest.declarative_net_request.rule_resources`, call `chrome.declarativeNetRequest.updateEnabledRulesets({ enableRulesetIds })` for every ruleset with `enabled !== false`. Fire-and-forget, errors logged not thrown. No new file, no API wrapper — the native `chrome.declarativeNetRequest` object is untouched (golden rule: never clobber a native API), so all its constants/methods pass through as-is.
+
+**Specs:**
+- `spec/chrome-declarativeNetRequest-spec.ts` (fixture `spec/fixtures/dnr`) — static ruleset auto-enables and blocks (the fix); dynamic rule stores+retrieves+enforces; session rule enforces (native regression guards).
+- `spec/chrome-webRequest-spec.ts` (fixture `rpc`) — native `onBeforeRequest` observes + MV2 blocking listener cancels; the app-level-clobbers-extension-listener finding, asserted as a guard (flips = revisit this decision).
+
+**Known limitation (documented, not fixed — low fleet risk):** the workaround re-applies the manifest's default enabled-set on every SW startup. If an extension disables one of its own static rulesets at runtime (rare), a later SW restart re-enables it, since Electron doesn't persist ruleset-enabled state across restarts either. Not fixed because no fleet extension has been observed to do this — revisit only on evidence.
+
+**Verification:** `yarn build` clean; full suite **120 pass / 0 fail** (baseline was 105; +15 from the DNR + webRequest specs).
+
+**Still deferred (unchanged from the original plan, evidence-gated — see P2.3/P2.4 below):** `identity.getAuthToken` (no fleet blocker — GMass/Boomerang/Streak passed without it) and `chrome.tts` (Google Translate read-aloud worked without it; DeepL's popup bug blocks verifying whether it even calls `tts`).
+
+**Not yet done:** P2.2's basic-auth retests (Bitwarden/KeePassXC) and the uBO Lite popup diagnosis — next steps, no code required to start them.
+
+---
+
 ## Context — what changed since Phase 2 was drafted
 
 Phase 2 originally listed four deferred items: `webRequest` extras, `declarativeNetRequest`, `identity.getAuthToken`, `tts`. Tier 3 manual testing plus a scan of the **actually-installed manifests** (`%APPDATA%/shell/Extensions`, 2026-07-15) changed the picture substantially:
@@ -93,19 +130,19 @@ Google Translate's read-aloud worked without it; DeepL declares `tts` but its po
 
 ## Sequencing
 
-| Order | Item | Gate |
+| Order | Item | Status |
 |---|---|---|
-| 1 | P2.0 spike (webRequest coexistence probe) | — |
-| 2 | P2.1 DNR v1 (matcher → API → specs → full suite) | spike outcome shapes the hook |
-| 3 | P2.2 basic-auth retests (Bitwarden/KeePassXC) | after spike; file findings in the manual-test doc |
-| 4 | uBO Lite: diagnose popup, then perf gate for DNR v2 | after DNR v1 |
-| 5 | P2.3 / P2.4 | only on confirmed fleet evidence |
+| 1 | P2.0 spike (webRequest coexistence probe) | ✅ done 2026-07-15 |
+| 2 | P2.1 DNR (collapsed to the startup-enable fix per spike results) | ✅ shipped 2026-07-15 |
+| 3 | P2.2 basic-auth retests (Bitwarden/KeePassXC) | ⬜ not started — no code needed, just manual retest |
+| 4 | uBO Lite: diagnose popup, then confirm its static rules enforce | ⬜ not started |
+| 5 | P2.3 / P2.4 | ⬜ deferred, evidence-gated |
 
 ## Acceptance
 
-- Full suite green (baseline 105+/0; new: `dnr-matcher-spec.ts`, `chrome-declarativeNetRequest-spec.ts`).
-- Manual: Dashlane & HubSpot SW consoles clean of `declarativeNetRequest` errors; DeepL's static ruleset loads (1 rule) and its `updateDynamicRules` calls succeed.
-- Docs updated on completion: EXTENSIONS_APIS.md (status table + Phase 2 rows), manual-test rows 5/20/22 retested, fix-app-extension limitations table, extensions-api-implementation skill backlog mirror.
+- ✅ Full suite green: **120 pass / 0 fail** (baseline 105; +15 new: `chrome-declarativeNetRequest-spec.ts`, `chrome-webRequest-spec.ts`).
+- ⬜ Manual (not yet done): Dashlane & HubSpot SW consoles clean of `declarativeNetRequest` errors in the real fleet; DeepL's static ruleset loads and its `updateDynamicRules` calls succeed; uBO Lite's static rules actually block ads once its popup issue is separately diagnosed.
+- Docs updated: EXTENSIONS_APIS.md Phase 2 section now points here; this doc's spike-results section is the source of truth. Still open: manual-test rows 5/20/22 retest, fix-app-extension limitations table sync, extensions-api-implementation skill backlog mirror (see Phase 2 wrap-up task).
 
 ## Out of scope for Phase 2 (unchanged)
 

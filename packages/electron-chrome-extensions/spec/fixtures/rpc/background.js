@@ -17,6 +17,11 @@ const transformArgs = (args, sender) => {
         return () => {
           sendIpc({ tabId, name: arg.__IPC_FN__ })
         }
+      } else if ('__NAN__' in arg) {
+        // JSON.stringify(NaN) is 'null', so a literal NaN can't survive the
+        // RPC bridge as an argument value — this marker reconstructs it on
+        // the extension side instead. See chrome-alarms-spec.ts.
+        return NaN
       } else {
         // Deep transform objects
         for (const key of Object.keys(arg)) {
