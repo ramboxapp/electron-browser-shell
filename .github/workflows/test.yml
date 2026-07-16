@@ -52,6 +52,14 @@ jobs:
       - name: Build
         run: yarn build
 
+      # Ubuntu 23.10+ restricts unprivileged user namespaces, which Chromium's
+      # sandbox needs. The sandbox must stay enabled during tests: Electron
+      # skips service worker preload scripts under --no-sandbox, silently
+      # breaking the MV3 service worker specs.
+      - name: Enable unprivileged user namespaces (Linux)
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
       # xvfb-run replaces the unmaintained GabrielBB/xvfb-action, which
       # still targets the deprecated Node 20 action runtime.
       - name: Run tests (Linux)

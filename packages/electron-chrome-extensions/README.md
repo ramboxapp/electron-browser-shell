@@ -492,7 +492,7 @@ See [Electron's Notification tutorial](https://www.electronjs.org/docs/tutorial/
 - Usage of Electron's `webRequest` API will prevent `chrome.webRequest` listeners from being called.
 - Chrome extensions are not supported in non-persistent/incognito sessions.
 - `chrome.webNavigation.onDOMContentLoaded` is only emitted for the top frame until [support for iframes](https://github.com/electron/electron/issues/27344) is added.
-- Service worker preload scripts require Electron's sandbox to be enabled. This is the default behavior, but might be overridden by the `--no-sandbox` flag or `sandbox: false` in the `webPreferences` of a `BrowserWindow`. Check for the `--no-sandbox` flag using `ps -eaf | grep <appname>`.
+- Service worker preload scripts require Electron's sandbox to be enabled. This is the default behavior, but is overridden by the app-wide `--no-sandbox` command-line flag (`app.commandLine.appendSwitch('no-sandbox')` or an `executableArgs`/launcher flag) — confirmed empirically to break every MV3 extension's service worker preload when set, regardless of platform. Check for it using `ps -eaf | grep <appname>`. A per-`BrowserWindow` `sandbox: false` in `webPreferences` does **not** have this effect on other windows/sessions — verified directly, it only affects that window's own renderer.
 
 ## License
 

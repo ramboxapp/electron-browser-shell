@@ -55,9 +55,19 @@ async function runMainProcessElectronTests() {
   let exe = require('electron')
   const runnerArgs = ['spec', ...unknownArgs.slice(2)]
 
-  // Fix issue in CI
-  // "The SUID sandbox helper binary was found, but is not configured correctly."
-  if (process.platform === 'linux') {
+  // Chromium hard-refuses to run as root without --no-sandbox, so keep the
+  // flag for root-only environments (e.g. docker/WSL as root). Everywhere
+  // else the sandbox must stay ON: Electron skips service worker preload
+  // scripts under --no-sandbox (see README), which silently breaks every spec
+  // relying on injected chrome.* APIs in MV3 service workers. CI runners get
+  // a working sandbox via the apparmor_restrict_unprivileged_userns sysctl in
+  // the workflow.
+  if (
+    process.platform === 'linux' &&
+    typeof process.getuid === 'function' &&
+    process.getuid() === 0
+  ) {
+    console.warn('Running as root: disabling sandbox. MV3 service worker specs will fail.')
     runnerArgs.push('--no-sandbox')
   }
 
