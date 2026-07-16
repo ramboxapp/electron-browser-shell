@@ -1015,6 +1015,7 @@ __metadata:
     "@types/chai-as-promised": "npm:^7.1.3"
     "@types/chrome": "npm:^0.0.300"
     "@types/mocha": "npm:^8.0.4"
+    "@types/ws": "npm:^8.5.10"
     chai: "npm:^4.2.0"
     chai-as-promised: "npm:^7.1.1"
     colors: "npm:^1.4.0"
@@ -1026,6 +1027,7 @@ __metadata:
     ts-node: "npm:^10.9.1"
     typescript: "npm:^4.9.4"
     walkdir: "npm:^0.4.1"
+    ws: "npm:^7.5.9"
   languageName: unknown
   linkType: soft
 
@@ -1438,6 +1440,15 @@ __metadata:
   dependencies:
     "@types/node": "npm:*"
   checksum: 10c0/b20b7820ee813f22de4f2ce98bdd12c68c930e016a8912b1ed967595ac0d8a4cbbff44f4d486dd97f77f5927e7b5725bdac7472c9ec5b27f53a5a13179f0612f
+  languageName: node
+  linkType: hard
+
+"@types/ws@npm:^8.5.10":
+  version: 8.18.1
+  resolution: "@types/ws@npm:8.18.1"
+  dependencies:
+    "@types/node": "npm:*"
+  checksum: 10c0/61aff1129143fcc4312f083bc9e9e168aa3026b7dd6e70796276dcfb2c8211c4292603f9c4864fae702f2ed86e4abd4d38aa421831c2fd7f856c931a481afbab
   languageName: node
   linkType: hard
 
@@ -8447,6 +8458,21 @@ __metadata:
     utf-8-validate:
       optional: true
   checksum: 10c0/aec4ef4eb65821a7dde7b44790f8699cfafb7978c9b080f6d7a98a7f8fc0ce674c027073a78574c94786ba7112cc90fa2cc94fc224ceba4d4b1030cff9662494
+  languageName: node
+  linkType: hard
+
+"ws@npm:^7.5.9":
+  version: 7.5.12
+  resolution: "ws@npm:7.5.12"
+  peerDependencies:
+    bufferutil: ^4.0.1
+    utf-8-validate: ^5.0.2
+  peerDependenciesMeta:
+    bufferutil:
+      optional: true
+    utf-8-validate:
+      optional: true
+  checksum: 10c0/1f14086e2a9e390496b12870fcaa375612d3910941f32879cc6ed6cdcd8e3a8e6b3419d0381c1caec0803e96cfa51234841f4a4c59b0cc647d15f939ef883e6f
   languageName: node
   linkType: hard
 
