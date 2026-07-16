@@ -226,11 +226,32 @@ export class ElectronChromeExtensions extends EventEmitter {
       if (unloadedExtensionIds.delete(extension.id)) {
         for (const tab of this.ctx.store.tabs) {
           if (!tab.isDestroyed() && tab.getURL().startsWith(extension.url)) {
-            tab.reload()
+            this.reloadTabWhenIdle(tab)
           }
         }
       }
     })
+  }
+
+  // Reloading a tab while its own navigation is still in flight (e.g. an
+  // extension page that calls chrome.runtime.reload() from a synchronous
+  // <script> during its own initial parse, before the page has finished
+  // loading) races Electron's internal navigation bookkeeping for that
+  // WebContents and can surface an uncaught ERR_ABORTED. Defer the reload
+  // until the current navigation settles instead of firing it immediately.
+  private reloadTabWhenIdle(tab: Electron.WebContents) {
+    if (!tab.isLoading()) {
+      tab.reload()
+      return
+    }
+
+    const onSettled = () => {
+      tab.removeListener('did-finish-load', onSettled)
+      tab.removeListener('did-fail-load', onSettled)
+      if (!tab.isDestroyed()) tab.reload()
+    }
+    tab.once('did-finish-load', onSettled)
+    tab.once('did-fail-load', onSettled)
   }
 
   private async prependPreload(modulePath?: string) {
