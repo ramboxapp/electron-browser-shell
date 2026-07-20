@@ -1149,6 +1149,79 @@ export const injectExtensionAPIs = () => {
       }
     }
 
+    // Repair chrome.webRequest's event objects on Electron 43.
+    // Upstream Electron 43.0.0 regression (reproduced with a minimal repro —
+    // bare loadExtension of an MV3 extension declaring the webRequest
+    // permission — on BOTH stock 43.0.0 and castlabs 43.0.0+wvcus; absent on
+    // stock 42.5.2): the chrome.webRequest namespace exists and Object.keys
+    // lists all its event names, but every event object (onBeforeRequest,
+    // onAuthRequired, ...) evaluates to undefined because Chromium's binding
+    // module fails to load ("No source for require(webRequestEvent)" logged
+    // by the extensions context). Real extensions register webRequest
+    // listeners at service-worker top level (observed live: Keeper's BG.js in
+    // Rambox), so the resulting `Cannot read properties of undefined
+    // (reading 'addListener')` kills their whole init — the popup's startup
+    // message never gets answered and the login UI never appears.
+    //
+    // Fill ONLY the missing events with inert Chrome-shaped stubs: listeners
+    // registered on a stub never fire (the native observation layer is what's
+    // broken — there is nothing to receive events from), but the extension
+    // survives startup with webRequest-dependent features degraded instead of
+    // dying outright. On Electron versions where the native API is intact
+    // this is a complete no-op, so nothing needs to detect versions.
+    const nativeWebRequest = (chrome as any).webRequest
+    if (nativeWebRequest) {
+      const webRequestEventNames = [
+        'onBeforeRequest',
+        'onBeforeSendHeaders',
+        'onSendHeaders',
+        'onHeadersReceived',
+        'onAuthRequired',
+        'onResponseStarted',
+        'onBeforeRedirect',
+        'onCompleted',
+        'onErrorOccurred',
+        'onActionIgnored',
+      ]
+      const missing = webRequestEventNames.filter((name) => nativeWebRequest[name] === undefined)
+      if (missing.length > 0) {
+        // Match Chrome's event-object surface so feature-detection and
+        // defensive calls behave (hasListener -> false, getRules -> empty).
+        const makeInertEvent = () => ({
+          addListener: () => {},
+          removeListener: () => {},
+          hasListener: () => false,
+          hasListeners: () => false,
+          getRules: (...args: any[]) => {
+            const cb = args[args.length - 1]
+            if (typeof cb === 'function') cb([])
+          },
+          addRules: () => {},
+          removeRules: (...args: any[]) => {
+            const cb = args[args.length - 1]
+            if (typeof cb === 'function') cb()
+          },
+        })
+
+        // The broken properties may be lazy accessors on the native object,
+        // so don't assign into it — rebuild a plain wrapper (spread copies
+        // the working members: handlerBehaviorChanged, constants, and any
+        // event that DID resolve) and replace chrome.webRequest wholesale,
+        // the same way the injected API factories above are installed.
+        try {
+          const repaired: any = { ...nativeWebRequest }
+          for (const name of missing) repaired[name] = makeInertEvent()
+          Object.defineProperty(chrome, 'webRequest', {
+            value: repaired,
+            enumerable: true,
+            configurable: true,
+          })
+        } catch (error) {
+          console.error('Failed to repair chrome.webRequest events', error)
+        }
+      }
+    }
+
     // Enable manifest-declared static declarativeNetRequest rulesets. Electron
     // 42's native DNR engine parses and enforces static rulesets but does NOT
     // honor their manifest `"enabled": true` flag at load — leaving them

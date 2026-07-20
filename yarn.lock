@@ -1020,7 +1020,7 @@ __metadata:
     chai-as-promised: "npm:^7.1.1"
     colors: "npm:^1.4.0"
     debug: "npm:^4.3.1"
-    electron: "npm:42.5.2"
+    electron: "npm:43.1.1"
     esbuild: "npm:^0.24.2"
     minimist: "npm:^1.2.7"
     mocha: "npm:^8.2.1"
@@ -3164,9 +3164,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"electron@npm:42.5.2":
-  version: 42.5.2
-  resolution: "electron@npm:42.5.2"
+"electron@npm:43.1.1":
+  version: 43.1.1
+  resolution: "electron@npm:43.1.1"
   dependencies:
     "@electron-internal/extract-zip": "npm:^1.0.1"
     "@electron/get": "npm:^5.0.0"
@@ -3174,7 +3174,7 @@ __metadata:
   bin:
     electron: cli.js
     install-electron: install.js
-  checksum: 10c0/12c0138c56723ccffd6dd85ec606e82c74b66831e7932f647979e2aaa7378dc34927ad0859d4a8f683241744842c41a1f1a75bc6e0759ccd5a6ddca3551e620f
+  checksum: 10c0/d977a9178aec6d7bb8865a57c3a037bbd2ccdc16539c02b9b463a79db948ed2e49f51258e1946a891207ca3dda8d1c6e7f8c055731f0d8462ae92b79da7777a2
   languageName: node
   linkType: hard
 
@@ -7337,7 +7337,7 @@ __metadata:
     "@electron-forge/plugin-webpack": "npm:^7.5.0"
     copy-webpack-plugin: "npm:^11.0.0"
     cross-env: "npm:^7.0.2"
-    electron: "npm:42.5.2"
+    electron: "npm:43.1.1"
     electron-chrome-context-menu: "npm:^1.1.0"
     electron-chrome-extensions: "npm:@ramboxapp/electron-chrome-extensions@^4.9.0"
     electron-chrome-web-store: "npm:^0.13.0"

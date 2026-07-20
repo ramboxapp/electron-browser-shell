@@ -29,6 +29,6 @@
     "@electron-forge/plugin-webpack": "^7.5.0",
     "copy-webpack-plugin": "^11.0.0",
     "cross-env": "^7.0.2",
-    "electron": "42.5.2"
+    "electron": "43.0.0"
   }
 }

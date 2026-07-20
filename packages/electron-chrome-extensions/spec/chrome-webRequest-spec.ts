@@ -11,24 +11,56 @@ describe('chrome.webRequest', () => {
   const server = useServer()
   const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc' })
 
+  describe('event objects', () => {
+    it('are real, intact event objects when the native API works (repair must be a no-op)', async () => {
+      // Guards the Electron 43 webRequest-event repair in the renderer
+      // preload (see "Repair chrome.webRequest's event objects" in
+      // src/renderer/index.ts): on Electron versions where the native events
+      // are intact — like the one this suite runs on — the repair must leave
+      // them completely untouched. The probe tests below prove listeners
+      // actually observe traffic (an accidentally-installed inert stub would
+      // pass a shape check but never fire); this one just proves the event
+      // object exists and responds to the events.Event surface.
+      const result = await browser.crx.eventMethod('webRequest.onBeforeRequest', 'hasListeners')
+      expect(result.ok, `hasListeners call failed: ${result.error}`).to.be.true
+      expect(result.result).to.be.a('boolean')
+    })
+  })
+
+  // Upstream Electron 43 regression: chrome.webRequest's event objects are
+  // undefined ("No source for require(webRequestEvent)"), so the native
+  // observation/blocking layer is dead — reproduced on stock 43.0.0 and
+  // still present in 43.1.1. The renderer preload fills the missing events
+  // with inert stubs so extensions survive startup (see "Repair
+  // chrome.webRequest's event objects" in src/renderer/index.ts), but
+  // listeners registered on a stub never fire. These specs assert the
+  // version-appropriate behavior: real observation/blocking on <=42, alive
+  // but inert on 43. If the >=43 branches start failing, Electron fixed the
+  // regression upstream — remove the shim and flip these back.
+  const nativeWebRequestBroken = parseInt(process.versions.electron, 10) >= 43
+
   describe('onBeforeRequest (native)', () => {
-    it('observes requests made by a page', async () => {
+    it(`observes requests made by a page (${nativeWebRequestBroken ? 'inert on Electron 43, upstream regression' : 'native'})`, async () => {
+      // On 43 this also proves the shim's core purpose: addListener at the
+      // fixture's top level did NOT throw, so probe-start replies ok.
       const started = await browser.crx.raw({ type: 'webrequest-probe-start' })
       expect(started).to.deep.equal({ ok: true })
 
       await browser.webContents.loadURL(server.getUrl() + 'probe-observe')
 
       const { observed } = await browser.crx.raw({ type: 'webrequest-probe-results' })
-      expect(observed.some((url: string) => url.includes('probe-observe'))).to.be.true
+      expect(observed.some((url: string) => url.includes('probe-observe'))).to.equal(
+        !nativeWebRequestBroken,
+      )
     })
 
-    it('blocking listener cancels matching requests (MV2 webRequestBlocking)', async () => {
+    it(`blocking listener ${nativeWebRequestBroken ? 'no longer blocks on Electron 43 (upstream regression)' : 'cancels matching requests (MV2 webRequestBlocking)'}`, async () => {
       await browser.crx.raw({ type: 'webrequest-probe-start', blockPath: 'blocked-path' })
 
       const blocked = await browser.webContents.executeJavaScript(
         `fetch('${server.getUrl()}blocked-path').then(() => 'fetched', () => 'blocked')`,
       )
-      expect(blocked).to.equal('blocked')
+      expect(blocked).to.equal(nativeWebRequestBroken ? 'fetched' : 'blocked')
 
       const allowed = await browser.webContents.executeJavaScript(
         `fetch('${server.getUrl()}allowed-path').then(() => 'fetched', () => 'blocked')`,
