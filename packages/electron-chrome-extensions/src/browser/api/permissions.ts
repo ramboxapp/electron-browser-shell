@@ -1,5 +1,6 @@
 import { ExtensionContext } from '../context'
 import { ExtensionEvent } from '../router'
+import { patternsCover } from './lib/match-patterns'
 
 /**
  * This is a very basic implementation of the permissions API. Likely
@@ -51,8 +52,10 @@ export class PermissionsAPI {
           currentPermissions.permissions.includes(permission),
         )
       : true
+    // Pattern containment, not string equality: a host permission of `https://*/*` covers
+    // `https://*.grammarly.com/*`, and Chromium answers `true` for it. See lib/match-patterns.
     const hasOrigins = permissions.origins
-      ? permissions.origins.every((origin) => currentPermissions.origins.includes(origin))
+      ? patternsCover(currentPermissions.origins, permissions.origins)
       : true
     return hasPermissions && hasOrigins
   }

@@ -37,6 +37,28 @@ function checkVersion() {
 }
 
 function resolvePreloadPath(modulePath?: string) {
+  const preloadFilename = 'chrome-extension-api.preload.js'
+
+  /*
+    An explicit modulePath wins over module resolution.
+
+    Deprecated, but it is the caller saying where the preload IS, and resolution can find a different
+    copy of this package than the one running. That is what happened in Rambox: its main process is
+    bundled from a local checkout of this library while `node_modules/electron-chrome-extensions`
+    still holds the published build, so resolving from __dirname handed the extension contexts the
+    PUBLISHED preload while the browser side ran the checkout. Every chrome.* namespace was still
+    there, with another build's behaviour, and nothing said so — the browser-global mirror and the
+    content-script storage alias simply did not exist in the preload that ran, which reads exactly
+    like "the fix does not work".
+  */
+  if (modulePath) {
+    process.emitWarning(
+      'electron-chrome-extensions: "modulePath" is deprecated and will be removed in future versions.',
+      { type: 'DeprecationWarning' },
+    )
+    return path.join(modulePath, 'dist', preloadFilename)
+  }
+
   // Attempt to resolve preload path from module exports
   try {
     return createRequire(__dirname).resolve('electron-chrome-extensions/preload')
@@ -44,17 +66,6 @@ function resolvePreloadPath(modulePath?: string) {
     if (process.env.NODE_ENV !== 'production') {
       console.error(error)
     }
-  }
-
-  const preloadFilename = 'chrome-extension-api.preload.js'
-
-  // Deprecated: use modulePath if provided
-  if (modulePath) {
-    process.emitWarning(
-      'electron-chrome-extensions: "modulePath" is deprecated and will be removed in future versions.',
-      { type: 'DeprecationWarning' },
-    )
-    return path.join(modulePath, 'dist', preloadFilename)
   }
 
   // Fallback to preload relative to entrypoint directory

@@ -8,6 +8,22 @@ export const injectExtensionAPIs = () => {
     serialize?: (...args: any[]) => any[]
   }
 
+  /** Compact, never-throwing rendering of call arguments for the development call log. */
+  const describeForLog = (value: any): string => {
+    try {
+      const text = JSON.stringify(value, (_key, inner) =>
+        typeof inner === 'function' ? '[function]' : inner instanceof Error ? String(inner) : inner,
+      )
+      return text === undefined
+        ? String(value)
+        : text.length > 600
+          ? text.slice(0, 600) + '...'
+          : text
+    } catch {
+      return String(value)
+    }
+  }
+
   const invokeExtension = async function (
     extensionId: string,
     fnName: string,
@@ -17,7 +33,10 @@ export const injectExtensionAPIs = () => {
     const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
 
     if (process.env.NODE_ENV === 'development') {
-      console.log(fnName, args)
+      // JSON, not the raw array: a console line reaching the host app through Electron's
+      // serviceWorkers 'console-message' event is already a string, so an object argument arrives as
+      // "[object Object]" and the one thing worth knowing — WHAT the extension asked for — is lost.
+      console.log(fnName, describeForLog(args))
     }
 
     if (options.noop) {
@@ -41,7 +60,7 @@ export const injectExtensionAPIs = () => {
     }
 
     if (process.env.NODE_ENV === 'development') {
-      console.log(fnName, '(result)', result)
+      console.log(fnName, '(result)', describeForLog(result))
     }
 
     if (callback) {
@@ -1114,20 +1133,42 @@ export const injectExtensionAPIs = () => {
     }
 
     // Initialize APIs
+    //
+    // Each namespace is injected on its own, because a single failure used to take out every
+    // namespace after it in iteration order and leave no trace of why. `windows` is last, so an
+    // exception anywhere earlier made `chrome.windows` undefined — and an extension that registers
+    // `chrome.windows.onFocusChanged` at service-worker top level (LastPass does) then died with
+    // "Cannot read properties of undefined", its worker never registered and the whole extension
+    // did nothing at all. Reading `chrome[apiName]` can throw too (Chromium's namespaces are lazy
+    // getters that load a binding module, and a module can fail to load: "No source for
+    // require(webRequest)" on Electron 43), so the read is inside the try as well.
     Object.keys(apiDefinitions).forEach((key: any) => {
       const apiName: keyof typeof chrome = key
-      const baseApi = chrome[apiName] as any
-      const api = apiDefinitions[apiName]!
+      try {
+        const api = apiDefinitions[apiName]!
 
-      // Allow APIs to opt-out of being available in this context.
-      if (api.shouldInject && !api.shouldInject()) return
+        // Allow APIs to opt-out of being available in this context.
+        if (api.shouldInject && !api.shouldInject()) return
 
-      Object.defineProperty(chrome, apiName, {
-        value: api.factory(baseApi),
-        enumerable: true,
-        configurable: true,
-      })
+        const baseApi = chrome[apiName] as any
+        Object.defineProperty(chrome, apiName, {
+          value: api.factory(baseApi),
+          enumerable: true,
+          configurable: true,
+        })
+      } catch (error) {
+        // Loud on purpose: a missing namespace is otherwise indistinguishable from an extension bug.
+        console.error(`electron-chrome-extensions: failed to inject chrome.${apiName}`, error)
+      }
     })
+
+    /*
+      Namespaces this file replaced on `chrome`, which have to be mirrored onto the `browser` global
+      once every repair below has run too. See mirrorOntoBrowserGlobal at the end of this function.
+    */
+    const replacedNamespaces = new Set(
+      Object.keys(apiDefinitions).filter((apiName) => !!(chrome as any)[apiName]),
+    )
 
     // Seed the active tab cache eagerly in extension contexts so early
     // incoming messages (e.g. content scripts connecting on page load) get a
@@ -1216,6 +1257,7 @@ export const injectExtensionAPIs = () => {
             enumerable: true,
             configurable: true,
           })
+          replacedNamespaces.add('webRequest')
         } catch (error) {
           console.error('Failed to repair chrome.webRequest events', error)
         }
@@ -1242,6 +1284,44 @@ export const injectExtensionAPIs = () => {
           )
         } catch (error) {
           console.error('Failed to enable static DNR rulesets', error)
+        }
+      }
+    }
+
+    /*
+      Mirror everything replaced above onto the `browser` global.
+
+      Chrome has no `browser` global at all — that is why webextension-polyfill exists — but Electron
+      defines one in extension contexts holding ONLY the natively implemented namespaces (action,
+      alarms, extension, i18n, idle, management, offscreen, runtime, scripting, storage, tabs,
+      webRequest, declarativeNetRequest). Everything injected above — windows, webNavigation,
+      cookies, contextMenus, permissions, notifications, privacy, downloads, commands, sidePanel… —
+      was missing from it, and its `webRequest` carried the same broken events the repair above fixes
+      on `chrome`.
+
+      Cross-browser extensions pick `globalThis.browser` over `chrome` precisely because its presence
+      is supposed to mean "this browser has the WebExtension API", so they got the half-empty object.
+      Measured against the catalog: LastPass 4.154.2 and NordPass 7.8.15 both died at service-worker
+      top level on it ("Cannot read properties of undefined", worker registration then failing with
+      status 15) and did nothing at all afterwards — no popup, no autofill — with no error anywhere a
+      user or the host app could see.
+
+      Runs last so the repairs above are included. The injected members take callbacks AND return
+      promises, so they satisfy both calling conventions a `browser`-flavoured extension may use.
+    */
+    const browserGlobal = (globalThis as any).browser
+    if (browserGlobal && typeof browserGlobal === 'object' && browserGlobal !== chrome) {
+      for (const apiName of replacedNamespaces) {
+        const injected = (chrome as any)[apiName]
+        if (!injected) continue
+        try {
+          Object.defineProperty(browserGlobal, apiName, {
+            value: injected,
+            enumerable: true,
+            configurable: true,
+          })
+        } catch (error) {
+          console.error(`electron-chrome-extensions: failed to mirror browser.${apiName}`, error)
         }
       }
     }

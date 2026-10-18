@@ -21,6 +21,6 @@
       "world": "MAIN"
     }
   ],
-  "permissions": ["alarms", "idle", "offscreen", "scripting", "tabs"],
+  "permissions": ["alarms", "idle", "offscreen", "scripting", "storage", "tabs", "webRequest"],
   "host_permissions": ["<all_urls>"]
 }

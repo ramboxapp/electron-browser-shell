@@ -60,7 +60,10 @@ if (process.env.SPEC_LOG_CONSOLE) {
 export const useExtensionBrowser = (opts: {
   url?: () => string
   file?: string
-  extensionName: string
+  /** A fixture directory name, under spec/fixtures. */
+  extensionName?: string
+  /** An absolute path, for an extension built or patched by the spec itself. */
+  extensionPath?: () => string
   openDevTools?: boolean
   assignTabDetails?: ChromeExtensionImpl['assignTabDetails']
 }) => {
@@ -91,7 +94,10 @@ export const useExtensionBrowser = (opts: {
       },
     })
 
-    extension = await customSession.loadExtension(path.join(fixtures, opts.extensionName))
+    const extensionDir = opts.extensionPath
+      ? opts.extensionPath()
+      : path.join(fixtures, opts.extensionName!)
+    extension = await customSession.loadExtension(extensionDir)
     await waitForBackgroundScriptEvaluated(extension, customSession)
 
     w = new BrowserWindow({

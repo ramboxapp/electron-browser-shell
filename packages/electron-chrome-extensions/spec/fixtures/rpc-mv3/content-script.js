@@ -35,8 +35,44 @@ async function exec(action) {
   sendIpc('success', result)
 }
 
+// Runs chrome.storage calls in the CONTENT SCRIPT's own isolated world, which is the one context
+// the library's preload cannot reach, and reports what each one did. `sync` and `managed` throw on
+// property access there unless something has aliased them onto `local`.
+async function reportStorage() {
+  const attempt = async (fn) => {
+    try {
+      return { ok: true, value: await fn() }
+    } catch (error) {
+      return { ok: false, error: String((error && error.message) || error) }
+    }
+  }
+  const result = {
+    shim: typeof self.__crxStorageShimRan === 'undefined' ? 'absent' : self.__crxStorageShimRan,
+    local: await attempt(async () => {
+      await chrome.storage.local.set({ __probe: 'local' })
+      return (await chrome.storage.local.get('__probe')).__probe
+    }),
+    sync: await attempt(async () => {
+      await chrome.storage.sync.set({ __probe: 'sync' })
+      return (await chrome.storage.sync.get('__probe')).__probe
+    }),
+    managed: await attempt(
+      async () => Object.keys(await chrome.storage.managed.get(null)).length >= 0,
+    ),
+    session: await attempt(async () => {
+      await chrome.storage.session.set({ __probe: 'session' })
+      return (await chrome.storage.session.get('__probe')).__probe
+    }),
+  }
+  sendIpc('success', result)
+}
+
 window.addEventListener('message', (event) => {
   const data = event.data
+  if (data && data.type === 'content-script-storage') {
+    reportStorage()
+    return
+  }
   // Relay any command posted by the test runner to the background/service
   // worker. Exclude the 'spec-ipc' relay messages this content script itself
   // posts to main-world.js, to avoid re-entering.

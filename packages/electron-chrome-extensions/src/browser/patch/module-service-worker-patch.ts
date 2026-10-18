@@ -53,7 +53,50 @@ export async function patchModuleServiceWorker(extensionPath: string): Promise<v
   }
 }
 
+/**
+ * Electron versions that register a `"type": "module"` service worker correctly, where this patch is
+ * not only unnecessary but harmful.
+ *
+ * Measured on Electron 43.0.0 (castlabs) with the four module-service-worker extensions in Rambox's
+ * catalog — 1Password 8.12.28.25, Everhour 1.6.320, HubSpot Sales 3.1.1.42592 and uBlock 25.5.0:
+ * every one of them registers, boots and calls chrome.* with the patch skipped. With the patch
+ * applied, uBlock does not register at all ("Uncaught SyntaxError: Cannot use import statement
+ * outside a module", then "Service worker registration failed. Status code: 15"), because the
+ * rewriter below cannot express its import graph and leaves real `import` statements in a script
+ * Electron now loads as classic. A dead ad blocker is a worse outcome than the bug this works around.
+ */
+const MODULE_SERVICE_WORKER_FIXED_FROM = 43
+
+const electronMajor = (): number | null => {
+  const version = process.versions?.electron
+  const major = version ? Number.parseInt(version.split('.')[0]!, 10) : NaN
+  return Number.isFinite(major) ? major : null
+}
+
+/**
+ * Whether {@link patchModuleServiceWorker} would actually rewrite anything on this Electron.
+ *
+ * A host app needs this because the rewrite happens ON DISK: an install converted by an older
+ * version of this library keeps running as a classic script even once the patch stops being applied,
+ * so the host has to reinstall it — and it must only do that once this returns false, or it would
+ * reinstall on every launch while the patch keeps converting the fresh copy again.
+ */
+export const willPatchModuleServiceWorker = (): boolean => {
+  if (process.env.CRX_FORCE_MODULE_SW_PATCH === '1') return true
+  const major = electronMajor()
+  return major === null || major < MODULE_SERVICE_WORKER_FIXED_FROM
+}
+
 async function patchModuleServiceWorkerUnsafe(extensionPath: string): Promise<void> {
+  const major = electronMajor()
+  // CRX_FORCE_MODULE_SW_PATCH=1 runs the rewrite regardless of version, so the conversion itself
+  // stays testable (and debuggable) on an Electron that no longer needs it.
+  const forced = process.env.CRX_FORCE_MODULE_SW_PATCH === '1'
+  if (!forced && major !== null && major >= MODULE_SERVICE_WORKER_FIXED_FROM) {
+    d(`skipping ${extensionPath}: Electron ${major} registers module service workers natively`)
+    return
+  }
+
   const manifestPath = path.join(extensionPath, 'manifest.json')
   let manifestText: string
   try {
@@ -99,6 +142,23 @@ async function patchModuleServiceWorkerUnsafe(extensionPath: string): Promise<vo
   }
 
   const fileProcessed = new Set<string>()
+  /*
+    Every file this function rewrites, with the bytes it had before. The rewrite is a regex
+    transform of someone else's bundle, so "it did not work" is a normal outcome and has to be
+    survivable: leaving a half-converted module in a script Electron loads as classic is strictly
+    worse than not patching at all (the worker fails to register and the extension does nothing).
+    Validated at the end; restored from here when the result still contains ES module syntax.
+  */
+  const originals = new Map<string, string>()
+  const rememberOriginal = async (filePath: string) => {
+    if (originals.has(filePath)) return
+    try {
+      originals.set(filePath, await fs.readFile(filePath, 'utf-8'))
+    } catch {
+      // Unreadable: nothing to restore, and the write below will fail loudly anyway.
+    }
+  }
+  await rememberOriginal(swPath)
   // ES module imports are hoisted: every statically-imported module is fully
   // evaluated before ANY of the importing module's own top-level code runs
   // (even code textually before the import). importScripts() has no such
@@ -123,9 +183,13 @@ async function patchModuleServiceWorkerUnsafe(extensionPath: string): Promise<vo
     if (!fileProcessed.has(imp.from)) {
       fileProcessed.add(imp.from)
       try {
+        await rememberOriginal(absoluteFrom)
         let vc = await fs.readFile(absoluteFrom, 'utf-8')
         // export default X  or  export default X()  →  self.GLOBAL = {default: X} / {default: X()}
-        vc = vc.replace(/\bexport\s+default\s+(\w+(?:\([^)]*\))?)/g, `self.${globalName} = {default: $1}`)
+        vc = vc.replace(
+          /\bexport\s+default\s+(\w+(?:\([^)]*\))?)/g,
+          `self.${globalName} = {default: $1}`,
+        )
         // export default { ... }  →  self.GLOBAL = {default: { ... }} with a closing brace appended at EOF
         if (/\bexport\s+default\s+\{/.test(vc)) {
           vc = vc.replace(/\bexport\s+default\s+\{/, `self.${globalName} = {default: {`)
@@ -177,7 +241,9 @@ async function patchModuleServiceWorkerUnsafe(extensionPath: string): Promise<vo
         })
         .join(';')
     } else {
-      const localName = imp.binding.startsWith('*') ? imp.binding.split('as').pop()!.trim() : imp.binding
+      const localName = imp.binding.startsWith('*')
+        ? imp.binding.split('as').pop()!.trim()
+        : imp.binding
       varLine = `var ${localName}=(self.${globalName}&&self.${globalName}.default!==undefined?self.${globalName}.default:self.${globalName})`
     }
 
@@ -212,9 +278,38 @@ async function patchModuleServiceWorkerUnsafe(extensionPath: string): Promise<vo
     'set:function(v){if(v&&typeof v==="object"&&typeof chrome==="object"){for(var k in chrome){if(!(k in v)){try{v[k]=chrome[k]}catch(e){}}}}__crxBrowser=v}' +
     '})}catch(e){}})();'
 
-  bgContent = '/* __crx_patched */\n' + browserNamespaceFallback + hoistedImportScripts.join('') + bgContent
+  bgContent =
+    '/* __crx_patched */\n' + browserNamespaceFallback + hoistedImportScripts.join('') + bgContent
 
   await fs.writeFile(swPath, bgContent, 'utf-8')
+
+  /*
+    Any ES module syntax left in a file this patch rewrote means the conversion did not hold — the
+    import forms it handles are `;import <binding> from "..."`, so an import at the very start of a
+    file, a side-effect-only `import "..."`, or an import nested one level deeper all survive it.
+    Chromium then throws "Cannot use import statement outside a module" at the first line of the
+    worker and registration fails with status 15, i.e. the extension is dead rather than degraded.
+    Put the originals back and leave the manifest alone: unpatched is the documented fallback.
+  */
+  const moduleSyntax = /(^|[;}\n])\s*(import[\s{*"']|export[\s{])/
+  const unconverted: string[] = []
+  for (const filePath of originals.keys()) {
+    try {
+      const written = await fs.readFile(filePath, 'utf-8')
+      if (moduleSyntax.test(written.replace('/* __crx_patched */', ''))) unconverted.push(filePath)
+    } catch {
+      // Cannot verify it; treat as converted rather than rolling back a file we cannot read.
+    }
+  }
+  if (unconverted.length > 0) {
+    for (const [filePath, content] of originals) await fs.writeFile(filePath, content, 'utf-8')
+    console.error(
+      `electron-chrome-extensions: patchModuleServiceWorker could not convert ${manifest.name} ` +
+        `${manifest.version} to a classic service worker (ES module syntax remains in ` +
+        `${unconverted.join(', ')}); restored the originals and left it unpatched`,
+    )
+    return
+  }
 
   // Remove "type": "module" so Electron loads the service worker as a classic script.
   const patchedManifest = JSON.parse(manifestText)

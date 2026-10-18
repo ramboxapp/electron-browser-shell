@@ -73,6 +73,41 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       break
     }
 
+    // Reports what the `browser` global looks like from inside the service worker. Electron defines
+    // one holding only its natively implemented namespaces, and cross-browser extensions prefer it
+    // over `chrome`, so anything this library injects has to be mirrored onto it too.
+    case 'browser-global': {
+      const globalBrowser = globalThis.browser
+      reply({
+        exists: !!globalBrowser,
+        isChrome: globalBrowser === chrome,
+        namespaces: globalBrowser ? Object.keys(globalBrowser).sort() : [],
+        // Namespaces this library injects, and whether browser.X is the very object chrome.X is.
+        mirrored: [
+          'windows',
+          'webNavigation',
+          'cookies',
+          'contextMenus',
+          'permissions',
+          'notifications',
+        ].filter(
+          (name) => globalBrowser && globalBrowser[name] && globalBrowser[name] === chrome[name],
+        ),
+        windowsEvent: !!(
+          globalBrowser &&
+          globalBrowser.windows &&
+          globalBrowser.windows.onFocusChanged
+        ),
+        webRequestEvent: !!(
+          globalBrowser &&
+          globalBrowser.webRequest &&
+          globalBrowser.webRequest.onBeforeRequest &&
+          typeof globalBrowser.webRequest.onBeforeRequest.addListener === 'function'
+        ),
+      })
+      break
+    }
+
     // Exercises the WebSocket proxy from a real MV3 service worker: open a
     // socket, receive an unsolicited text frame, request + receive a binary
     // frame, then close. Replies with an ordered log of what happened.
