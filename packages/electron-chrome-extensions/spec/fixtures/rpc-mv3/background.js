@@ -147,6 +147,14 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       return true
     }
 
+    case 'tabs-send-message': {
+      chrome.tabs.sendMessage(message.tabId, { type: 'ping-from-background' }, (response) => {
+        const error = chrome.runtime.lastError
+        reply(error ? { lastError: error.message } : response)
+      })
+      return true
+    }
+
     case 'content-script-ping': {
       reply({ reply: 'pong' })
       break

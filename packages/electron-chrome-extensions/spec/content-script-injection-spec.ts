@@ -74,6 +74,25 @@ describe('content script injection', () => {
     expect(await attr('data-crx-http-matches')).to.equal('ran')
   })
 
+  it('runs EVERY main-world entry, not just the first', async () => {
+    // Dashlane declares three. In Rambox only the first ran, so its shadow-DOM and top-layer page
+    // scripts never patched the page and its form classifier never got the handshake it waits on:
+    // the extension looked alive and quietly did nothing on every login form.
+    expect(await attr('data-crx-main-world-first'), 'the first main-world entry').to.equal('ran')
+    expect(await attr('data-crx-main-world-second'), 'the second main-world entry').to.equal('ran')
+    expect(
+      await attr('data-crx-main-world-third'),
+      'a main-world entry with two match patterns',
+    ).to.equal('ran')
+  })
+
+  it('matches on any pattern of an entry, not only the first', async () => {
+    // Dashlane's shadow-DOM entry lists http first and https second; on an https page only the
+    // entries whose FIRST pattern matched ran. This is that shape with the schemes swapped, so it
+    // fails the same way without needing TLS in the harness.
+    expect(await attr('data-crx-second-pattern')).to.equal('ran')
+  })
+
   it('lets a content script open a port to its background and hear back', async () => {
     expect(
       await attr('data-crx-port-opened'),
@@ -95,6 +114,19 @@ describe('content script injection', () => {
       await attr('data-crx-page-script'),
       'it loaded but never executed in the main world',
     ).to.equal('ran')
+  })
+
+  it('delivers a tabs.sendMessage from the background to the content script', async () => {
+    // The direction an extension uses to tell a page to act: autofill is the background deciding
+    // and the content script doing. Measured in Rambox, Dashlane's background logs "Could not
+    // establish connection. Receiving end does not exist." and its content script never acts.
+    const reply: any = await browser.crx.raw({
+      type: 'tabs-send-message',
+      tabId: browser.window.webContents.id,
+    })
+    expect(reply, `the background got: ${JSON.stringify(reply)}`).to.deep.equal({
+      reply: 'pong-from-content-script',
+    })
   })
 
   it('lets a content script round-trip a sendMessage to its background', async () => {
@@ -180,11 +212,37 @@ describe('content script injection in a <webview> guest', () => {
     expect(await guestAttr('data-crx-http-matches')).to.equal('ran')
   })
 
+  it('runs every main-world entry inside the guest too', async () => {
+    // The shape Rambox serves. Measured there with the real Dashlane: of its three main-world
+    // entries only the first patched the page, which is why its classifier never started.
+    expect(await guestAttr('data-crx-main-world-first'), 'the first main-world entry').to.equal(
+      'ran',
+    )
+    expect(await guestAttr('data-crx-main-world-second'), 'the second main-world entry').to.equal(
+      'ran',
+    )
+    expect(
+      await guestAttr('data-crx-main-world-third'),
+      'a main-world entry with two match patterns',
+    ).to.equal('ran')
+  })
+
   it('reaches the background from inside the guest', async () => {
     expect(await guestAttr('data-crx-port-reply'), 'the port never delivered a reply').to.equal(
       'pong',
     )
     expect(await guestAttr('data-crx-sendmessage-reply')).to.equal('pong')
+  })
+
+  it('delivers a tabs.sendMessage from the background into the guest', async () => {
+    const guest = await guestContents()
+    browser.extensions.addTab(guest, browser.window)
+    browser.extensions.selectTab(guest)
+    const reply: any = await browser.crx.raw({ type: 'tabs-send-message', tabId: guest.id })
+    expect(reply, `the background got: ${JSON.stringify(reply)}`).to.deep.equal({
+      reply: 'pong-from-content-script',
+    })
+    expect(await guestAttr('data-crx-got-background-message')).to.equal('yes')
   })
 
   it('injects a script of the extension origin into the guest page', async () => {

@@ -10,24 +10,79 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["content-script.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content-script.js"
+      ],
       "run_at": "document_end"
     },
     {
-      "matches": ["<all_urls>"],
-      "js": ["main-world.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "main-world.js"
+      ],
       "run_at": "document_end",
       "world": "MAIN"
     },
     {
-      "matches": ["http://*/*"],
-      "js": ["http-matches-content-script.js"],
+      "matches": [
+        "http://*/*"
+      ],
+      "js": [
+        "http-matches-content-script.js"
+      ],
       "run_at": "document_end"
+    },
+    {
+      "matches": [
+        "http://*/*"
+      ],
+      "js": [
+        "main-world-second.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "main-world-third.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://only-this-host-never-matches.invalid/*",
+        "http://*/*"
+      ],
+      "js": [
+        "main-world-second-pattern.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
     }
   ],
-  "permissions": ["alarms", "idle", "offscreen", "scripting", "storage", "tabs", "webRequest"],
-  "host_permissions": ["<all_urls>"],
+  "permissions": [
+    "alarms",
+    "idle",
+    "offscreen",
+    "scripting",
+    "storage",
+    "tabs",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "commands": {
     "autofill_login": {
       "suggested_key": {
@@ -53,8 +108,12 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["page-script.js"],
-      "matches": ["<all_urls>"]
+      "resources": [
+        "page-script.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
     }
   ]
 }

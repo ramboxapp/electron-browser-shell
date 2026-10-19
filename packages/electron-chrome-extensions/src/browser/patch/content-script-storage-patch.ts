@@ -27,7 +27,7 @@ const SHIM_FILE = 'crx_content_script_storage.js'
  * `storage.session` is deliberately left alone: it throws in a content script in Chrome too, unless
  * the extension raises its access level, so the throw here is correct behaviour.
  */
-const SHIM_SOURCE = `/* electron-chrome-extensions: chrome.storage.sync/managed for content scripts */
+const SHIM_SOURCE = `/* electron-chrome-extensions: the APIs a content script is missing here */
 (function () {
   if (typeof chrome === 'undefined' || !chrome.storage) return
   var local = chrome.storage.local
@@ -37,18 +37,21 @@ const SHIM_SOURCE = `/* electron-chrome-extensions: chrome.storage.sync/managed 
   // then reject with '"sync" is not available in this instance of Chrome'. So presence proves
   // nothing — a feature check on the property passes and the extension still breaks on first use —
   // and nothing synchronous can tell a working area from a stub.
-  var define = function (name, value) {
+  var defineOn = function (target, name, value) {
     try {
-      Object.defineProperty(chrome.storage, name, { value: value, configurable: true, enumerable: true })
+      Object.defineProperty(target, name, { value: value, configurable: true, enumerable: true })
       return true
     } catch (error) {
       try {
-        chrome.storage[name] = value
-        return chrome.storage[name] === value
+        target[name] = value
+        return target[name] === value
       } catch (ignored) {
         return false
       }
     }
+  }
+  var define = function (name, value) {
+    return defineOn(chrome.storage, name, value)
   }
   // Answers the way the preload answers in every other context: an administrator policy store that
   // is read-only and, with no policy installed, empty. Aliasing it onto local instead would report
@@ -93,9 +96,38 @@ const SHIM_SOURCE = `/* electron-chrome-extensions: chrome.storage.sync/managed 
       hasListeners: function () { return false },
     },
   }
+  /*
+    chrome.dom: Chromium gives a content script openOrClosedShadowRoot, and Electron implements
+    the namespace nowhere, so an extension that walks shadow DOM finds chrome.dom undefined.
+    Measured against a real Chromium with the same extension: Chrome's content-script world has
+    'dom' and 'extension', ours had neither.
+
+    This covers an OPEN shadow root, which is what a page built out of web components has. A CLOSED
+    root cannot be reached from script without a native binding, so it answers null — the same
+    answer as "no shadow root here", which every caller already handles.
+  */
+  var dom = {
+    openOrClosedShadowRoot: function (element) {
+      try {
+        return (element && element.shadowRoot) || null
+      } catch (error) {
+        return null
+      }
+    },
+  }
+
+  // chrome.extension in a content script: Chrome exposes exactly these two.
+  var extension = {
+    inIncognitoContext: false,
+    ViewType: { TAB: 'tab', POPUP: 'popup' },
+  }
+
   var failed = []
   if (!define('sync', local)) failed.push('sync')
   if (!define('managed', managed)) failed.push('managed')
+  if (typeof chrome.dom === 'undefined' && !defineOn(chrome, 'dom', dom)) failed.push('dom')
+  if (typeof chrome.extension === 'undefined' && !defineOn(chrome, 'extension', extension))
+    failed.push('extension')
   // A failed definition is otherwise indistinguishable from the shim never having run at all.
   self.__crxStorageShimRan = failed.length === 0 ? 'ok' : 'failed:' + failed.join(',')
   if (failed.length) {
@@ -166,9 +198,16 @@ async function patchContentScriptStorageUnsafe(extensionPath: string): Promise<b
     changed = true
   }
 
+  /*
+    The shim file is written even when the manifest already points at it. A newer version of this
+    library ships a newer shim — one that defines APIs the old one did not — and an extension
+    patched by an older version would otherwise keep the stale copy for as long as its folder
+    survives, which is to say for ever. Writing it is cheap and idempotent.
+  */
+  await fs.writeFile(path.join(extensionPath, SHIM_FILE), SHIM_SOURCE, 'utf-8')
+
   if (!changed) return false
 
-  await fs.writeFile(path.join(extensionPath, SHIM_FILE), SHIM_SOURCE, 'utf-8')
   await fs.writeFile(manifestPath, JSON.stringify(manifest), 'utf-8')
   d(`patched content script storage for ${manifest.name} ${manifest.version}`)
   return true

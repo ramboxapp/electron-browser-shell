@@ -13,3 +13,6 @@ window.addEventListener('message', (event) => {
     electronTest.sendIpc(data.name, ...(data.args || []))
   }
 })
+
+// Observable proof that the first main-world entry ran, for content-script-injection-spec.
+document.documentElement.setAttribute('data-crx-main-world-first', 'ran')

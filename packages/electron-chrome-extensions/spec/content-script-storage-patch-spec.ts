@@ -92,6 +92,30 @@ describe('content script storage patch', () => {
       ])
     })
 
+    it('refreshes a stale shim even when the manifest already points at it', async () => {
+      // A newer version of this library ships a newer shim — one that defines APIs the old one did
+      // not. The manifest already names the file, so without rewriting it an extension patched by an
+      // older version keeps the stale copy for as long as its folder survives.
+      await writeManifest({
+        name: 'cs',
+        version: '1.0',
+        manifest_version: 3,
+        content_scripts: [{ matches: ['<all_urls>'], js: ['a.js'] }],
+      })
+      expect(await patchContentScriptStorage(dir)).to.be.true
+
+      const shimPath = path.join(dir, CONTENT_SCRIPT_STORAGE_SHIM_FILE)
+      await fs.writeFile(shimPath, '/* a shim from an older version */', 'utf-8')
+
+      // Nothing left to change in the manifest, so it reports false — and still refreshes the file.
+      expect(await patchContentScriptStorage(dir)).to.be.false
+      const shim = await fs.readFile(shimPath, 'utf-8')
+      expect(shim, 'the stale shim survived a patch').to.not.equal(
+        '/* a shim from an older version */',
+      )
+      expect(shim).to.contain('openOrClosedShadowRoot')
+    })
+
     it('is a no-op for an extension with no content scripts', async () => {
       await writeManifest({ name: 'cs', version: '1.0', manifest_version: 3 })
       expect(await patchContentScriptStorage(dir)).to.be.false
@@ -157,6 +181,19 @@ describe('content script storage patch', () => {
       expect(result.managed.value.setRejection, 'a policy write should be refused').to.contain(
         'read-only',
       )
+    })
+
+    it('defines chrome.dom and chrome.extension, which Electron does not', async () => {
+      const result: any = await browser.crx.raw({ type: 'content-script-storage' })
+      // Measured against a real Chromium with the same extension: Chrome's content-script world has
+      // both namespaces and ours had neither, so an extension that walks shadow DOM found nothing.
+      expect(result.dom.ok, `chrome.dom failed: ${result.dom.error}`).to.be.true
+      expect(result.dom.value.reached, 'an open shadow root should come back').to.be.true
+      expect(result.dom.value.noRoot, 'an element with no shadow root answers null').to.be.true
+      expect(result.extensionNs.ok, `chrome.extension failed: ${result.extensionNs.error}`).to.be
+        .true
+      expect(result.extensionNs.value.inIncognitoContext).to.equal(false)
+      expect(result.extensionNs.value.hasViewType).to.equal('object')
     })
 
     it('leaves storage.session throwing, as Chrome does', async () => {

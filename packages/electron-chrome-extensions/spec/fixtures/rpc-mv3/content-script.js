@@ -66,6 +66,20 @@ async function reportStorage() {
         (error) => String((error && error.message) || error),
       ),
     })),
+    // chrome.dom and chrome.extension: Chromium gives a content script both, Electron gives neither.
+    dom: await attempt(async () => {
+      const host = document.createElement('div')
+      document.body.appendChild(host)
+      const open = host.attachShadow({ mode: 'open' })
+      const reached = chrome.dom.openOrClosedShadowRoot(host) === open
+      const noRoot = chrome.dom.openOrClosedShadowRoot(document.body) === null
+      host.remove()
+      return { reached, noRoot }
+    }),
+    extensionNs: await attempt(async () => ({
+      inIncognitoContext: chrome.extension.inIncognitoContext,
+      hasViewType: typeof chrome.extension.ViewType,
+    })),
     session: await attempt(async () => {
       await chrome.storage.session.set({ __probe: 'session' })
       return (await chrome.storage.session.get('__probe')).__probe
@@ -88,11 +102,18 @@ window.addEventListener('message', (event) => {
   }
 })
 
-chrome.runtime.onMessage.addListener((message) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   switch (message.type) {
     case 'send-ipc': {
       const [name] = message.args
       sendIpc(name)
+      break
+    }
+    // The other direction: the background pushing to the page, which is how an extension tells a
+    // content script to act. A reply proves the round trip, not just that the send did not throw.
+    case 'ping-from-background': {
+      document.documentElement.setAttribute('data-crx-got-background-message', 'yes')
+      sendResponse({ reply: 'pong-from-content-script' })
       break
     }
   }
