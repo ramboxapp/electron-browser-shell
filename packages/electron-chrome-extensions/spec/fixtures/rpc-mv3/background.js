@@ -87,6 +87,55 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       break
     }
 
+    /*
+      What the administrator-policy store answers, asked from inside the worker.
+
+      Not reachable through 'api', which addresses an API as `namespace.method` and so cannot name
+      `storage.managed.get`. The blocked-loop part at the end is the point of the whole case: the
+      bug it pins down only appears when the worker is busy past a caller's deadline.
+    */
+    case 'managed-storage': {
+      ;(async () => {
+        const out = {}
+        // Something in local, so the managed area can be caught reporting it as policy.
+        await chrome.storage.local.set({ managedLeakProbe: 'local-only' })
+
+        out.getKey = await chrome.storage.managed.get('PolicyKey')
+        out.getDefaults = await chrome.storage.managed.get({ PolicyKey: 'fallback' })
+        out.getAll = await chrome.storage.managed.get(null)
+        out.getKeys =
+          typeof chrome.storage.managed.getKeys === 'function'
+            ? await chrome.storage.managed.getKeys()
+            : null
+        out.bytesInUse = await chrome.storage.managed.getBytesInUse(null)
+        out.setRejection = await chrome.storage.managed.set({ PolicyKey: 'written' }).then(
+          () => null,
+          (err) => String((err && err.message) || err),
+        )
+        // And a write must not land anywhere either.
+        out.afterWrite = await chrome.storage.managed.get('PolicyKey')
+
+        // A caller that races the read against a short timer has to win even when the worker's loop
+        // was blocked past the timer's deadline: that is Grammarly's 3s race, and what an answer
+        // needing the main process loses.
+        out.beatsTimer = await new Promise((resolve) => {
+          let winner = null
+          chrome.storage.managed.get('PolicyKey', () => {
+            winner = winner || 'answer'
+          })
+          setTimeout(() => resolve(winner || 'timer'), 10)
+          const until = Date.now() + 60
+          while (Date.now() < until) {
+            /* block the loop, the way a heavy startup does */
+          }
+        })
+
+        await chrome.storage.local.remove('managedLeakProbe')
+        reply(out)
+      })()
+      return true
+    }
+
     case 'browser-global': {
       const globalBrowser = globalThis.browser
       reply({

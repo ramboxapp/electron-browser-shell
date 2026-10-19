@@ -20,10 +20,14 @@ const SHIM_FILE = 'crx_content_script_storage.js'
  * same extension share one isolated world and the files of one entry run in array order, so putting
  * this first in each entry's `js` makes the aliases visible to the extension's own scripts.
  *
+ * `sync` is aliased onto `local`, which is where this library keeps sync data in every other
+ * context. `managed` is NOT: it gets the same empty read-only policy store the preload installs,
+ * because aliasing it would hand the extension its own data back as administrator policy.
+ *
  * `storage.session` is deliberately left alone: it throws in a content script in Chrome too, unless
  * the extension raises its access level, so the throw here is correct behaviour.
  */
-const SHIM_SOURCE = `/* electron-chrome-extensions: chrome.storage.sync/managed alias for content scripts */
+const SHIM_SOURCE = `/* electron-chrome-extensions: chrome.storage.sync/managed for content scripts */
 (function () {
   if (typeof chrome === 'undefined' || !chrome.storage) return
   var local = chrome.storage.local
@@ -32,28 +36,70 @@ const SHIM_SOURCE = `/* electron-chrome-extensions: chrome.storage.sync/managed 
   // chrome.storage.managed in a content script, as objects with the right method names whose calls
   // then reject with '"sync" is not available in this instance of Chrome'. So presence proves
   // nothing — a feature check on the property passes and the extension still breaks on first use —
-  // and nothing synchronous can tell a working area from a stub. Both are replaced the same way the
-  // preload replaces them in every other extension context: aliased to storage.local.
-  var alias = function (name) {
+  // and nothing synchronous can tell a working area from a stub.
+  var define = function (name, value) {
     try {
-      Object.defineProperty(chrome.storage, name, { value: local, configurable: true, enumerable: true })
+      Object.defineProperty(chrome.storage, name, { value: value, configurable: true, enumerable: true })
       return true
     } catch (error) {
       try {
-        chrome.storage[name] = local
-        return chrome.storage[name] === local
+        chrome.storage[name] = value
+        return chrome.storage[name] === value
       } catch (ignored) {
         return false
       }
     }
   }
-  var failed = ['sync', 'managed'].filter(function (name) {
-    return !alias(name)
-  })
-  // A failed alias is otherwise indistinguishable from the shim never having run at all.
+  // Answers the way the preload answers in every other context: an administrator policy store that
+  // is read-only and, with no policy installed, empty. Aliasing it onto local instead would report
+  // the extension's own data as policy — the same leak, just in the one world the preload cannot
+  // reach.
+  var answer = function (value, args) {
+    var callback = args.length && typeof args[args.length - 1] === 'function' ? args[args.length - 1] : undefined
+    if (callback) {
+      Promise.resolve().then(function () { callback(value) })
+      return undefined
+    }
+    return Promise.resolve(value)
+  }
+  var readOnly = function () {
+    var args = Array.prototype.slice.call(arguments)
+    var callback = args.length && typeof args[args.length - 1] === 'function' ? args[args.length - 1] : undefined
+    if (callback) {
+      Promise.resolve().then(function () { callback() })
+      return undefined
+    }
+    return Promise.reject(new Error('This is a read-only store.'))
+  }
+  var noop = function () {}
+  var managed = {
+    get: function (keys) {
+      var args = Array.prototype.slice.call(arguments)
+      // Chrome returns the defaults the caller passed and overrides none of them.
+      var result = keys && typeof keys === 'object' && !Array.isArray(keys) && typeof keys !== 'function'
+        ? Object.assign({}, keys)
+        : {}
+      return answer(result, args)
+    },
+    getKeys: function () { return answer([], Array.prototype.slice.call(arguments)) },
+    getBytesInUse: function () { return answer(0, Array.prototype.slice.call(arguments)) },
+    set: readOnly,
+    remove: readOnly,
+    clear: readOnly,
+    onChanged: {
+      addListener: noop,
+      removeListener: noop,
+      hasListener: function () { return false },
+      hasListeners: function () { return false },
+    },
+  }
+  var failed = []
+  if (!define('sync', local)) failed.push('sync')
+  if (!define('managed', managed)) failed.push('managed')
+  // A failed definition is otherwise indistinguishable from the shim never having run at all.
   self.__crxStorageShimRan = failed.length === 0 ? 'ok' : 'failed:' + failed.join(',')
   if (failed.length) {
-    console.error('electron-chrome-extensions: could not alias chrome.storage.' + failed.join('/'))
+    console.error('electron-chrome-extensions: could not define chrome.storage.' + failed.join('/'))
   }
 })()
 `

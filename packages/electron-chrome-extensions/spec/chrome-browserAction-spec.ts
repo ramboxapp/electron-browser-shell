@@ -257,12 +257,11 @@ describe('chrome.browserAction', () => {
           const list = document.querySelector('browser-action-list')!
           list.setAttribute('style', 'max-width: 60px')
           const style = getComputedStyle(list)
-          const actions = list.shadowRoot!.querySelectorAll('.action')
-          const rows = new Set(Array.from(actions).map((a) => a.getBoundingClientRect().y))
+          // Not the row count: the harness loads one extension, so it would read 1 either way. The
+          // real count (3 with the catalog's 20) only exists in an app, and lives in its doc.
           return {
             flexWrap: style.flexWrap,
             overflows: list.scrollWidth > list.clientWidth,
-            rows: rows.size,
           }
         }})();`,
       )

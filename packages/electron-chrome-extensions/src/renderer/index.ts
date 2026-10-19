@@ -1021,10 +1021,89 @@ export const injectExtensionAPIs = () => {
       storage: {
         factory: (base) => {
           const local = base && base.local
+
+          /*
+            `managed` is the administrator's policy store. It is read-only, and on a machine with no
+            enterprise policy installed Chrome answers every read with an empty result. Electron has no
+            policy backend, so empty is not a fallback here: it is the same answer Chrome gives, and the
+            only honest one.
+
+            It used to alias `local`, which was wrong in two ways.
+
+            It handed an extension its OWN data back as administrator policy. `managed.get(null)`
+            returned the whole local store, and a password manager reads that area for vault policy —
+            measured in Rambox, Grammarly's `managed.get(null)` came back holding its alarms, its
+            cached config and the active tab's URL.
+
+            And every read took a round trip to the main process. Grammarly asks for three policy keys
+            while its service worker starts and races each one against a 3s timeout; under the load of
+            twenty extensions booting, the reply lost that race on every single launch
+            ("Manage storage timeout to get \"GrammarlyExtensionMode\"", three times per start).
+            Measured with the worker's event loop blocked past the deadline: the IPC answer never
+            arrives and the timer wins, while an answer resolved in a microtask lands the instant the
+            loop frees up. So this area never leaves the renderer.
+
+            `sync` still aliases `local`: it is a real read/write store, and backing it with local data
+            is what an extension expects to find in it.
+          */
+          const EMPTY_RESULT = () => ({}) as Record<string, unknown>
+
+          const managedGet = (...args: any[]) => {
+            const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+            const keys = args[0]
+            // Chrome returns the defaults an extension passes and overrides none of them, because
+            // there is no policy to override them with. Arrays and plain keys simply find nothing.
+            const result =
+              keys && typeof keys === 'object' && !Array.isArray(keys)
+                ? { ...(keys as Record<string, unknown>) }
+                : EMPTY_RESULT()
+            if (callback) {
+              queueMicrotask(() => callback(result))
+              return
+            }
+            return Promise.resolve(result)
+          }
+
+          /*
+            Chrome exposes the write methods on the managed area and fails the call; it reports that
+            through `runtime.lastError` for a callback, which a preload cannot set, so the callback
+            form here comes back without one. The promise form — what MV3 code uses — rejects with
+            Chrome's own message.
+          */
+          const readOnly =
+            () =>
+            (...args: any[]) => {
+              const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+              if (callback) {
+                queueMicrotask(() => callback())
+                return
+              }
+              return Promise.reject(new Error('This is a read-only store.'))
+            }
+
+          // Policy never changes while the app runs, so this event has nothing to report. Taking
+          // local's would deliver the extension's own writes as policy changes, which is the leak
+          // above in event form.
+          const inertOnChanged = {
+            addListener: () => {},
+            removeListener: () => {},
+            hasListener: () => false,
+            hasListeners: () => false,
+          }
+
+          const managed = {
+            get: managedGet,
+            getKeys: localStub([]),
+            getBytesInUse: localStub(0),
+            set: readOnly(),
+            remove: readOnly(),
+            clear: readOnly(),
+            onChanged: inertOnChanged,
+          }
+
           return {
             ...base,
-            // TODO: provide a backend for browsers to opt-in to
-            managed: local,
+            managed,
             sync: local,
           }
         },

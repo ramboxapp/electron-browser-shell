@@ -56,9 +56,16 @@ async function reportStorage() {
       await chrome.storage.sync.set({ __probe: 'sync' })
       return (await chrome.storage.sync.get('__probe')).__probe
     }),
-    managed: await attempt(
-      async () => Object.keys(await chrome.storage.managed.get(null)).length >= 0,
-    ),
+    // local and sync both wrote __probe just above, so if this area were aliased onto local the
+    // keys below would carry it — which is exactly how the leak would read from a content script.
+    managed: await attempt(async () => ({
+      keys: Object.keys(await chrome.storage.managed.get(null)),
+      defaults: await chrome.storage.managed.get({ PolicyKey: 'fallback' }),
+      setRejection: await chrome.storage.managed.set({ PolicyKey: 'written' }).then(
+        () => null,
+        (error) => String((error && error.message) || error),
+      ),
+    })),
     session: await attempt(async () => {
       await chrome.storage.session.set({ __probe: 'session' })
       return (await chrome.storage.session.get('__probe')).__probe

@@ -147,9 +147,16 @@ describe('content script storage patch', () => {
       expect(result.sync.value).to.equal('sync')
     })
 
-    it('can read storage.managed', async () => {
+    it('gives storage.managed the same empty read-only policy store as every other context', async () => {
       const result: any = await browser.crx.raw({ type: 'content-script-storage' })
       expect(result.managed.ok, `managed failed: ${result.managed.error}`).to.be.true
+      // Aliasing it onto local, as `sync` is, would report the extension's own data as
+      // administrator policy — and local holds `__probe` by the time this runs.
+      expect(result.managed.value.keys, 'local data leaked in as policy').to.deep.equal([])
+      expect(result.managed.value.defaults).to.deep.equal({ PolicyKey: 'fallback' })
+      expect(result.managed.value.setRejection, 'a policy write should be refused').to.contain(
+        'read-only',
+      )
     })
 
     it('leaves storage.session throwing, as Chrome does', async () => {
