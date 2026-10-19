@@ -12,11 +12,16 @@ import { useExtensionBrowser, useServer } from './hooks'
  * holding Grammarly's alarms, its cached config and the active tab's URL. Password managers read
  * this area for vault policy.
  *
- * And it answered from the main process. Grammarly reads three policy keys while its service worker
- * starts and races each against a 3s timeout; under the load of twenty extensions booting, the reply
- * lost that race on every launch (`Manage storage timeout to get "GrammarlyExtensionMode"`, three
- * times per start). With the worker's loop blocked past the deadline the IPC answer never arrives at
- * all and the timer wins — so the area now answers in a microtask and never leaves the renderer.
+ * And it answered from the main process, which a caller can lose. Extensions race a policy read
+ * against a timeout — Grammarly gives it 3s — and with the worker's loop blocked past such a
+ * deadline the IPC answer never arrives at all and the timer wins, while an answer resolved in a
+ * microtask lands the instant the loop frees up. There is nothing to fetch for an unmanaged machine,
+ * so the area now answers in a microtask and never leaves the renderer. That is what the last test
+ * here pins down.
+ *
+ * It does NOT fix Grammarly's own `Manage storage timeout` errors: its `get`, copied verbatim into
+ * its own worker, resolves in 0 ms across the exact window where its calls expire, so that one is in
+ * its adapter. Measurements in docs/EXTENSION_CATALOG_HEALTH.md in the Rambox monorepo.
  *
  * Empty is not a stub standing in for a backend: it is what Chrome answers on a machine with no
  * policy installed, which is every machine Electron runs on.

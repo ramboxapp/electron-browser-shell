@@ -1035,13 +1035,16 @@ export const injectExtensionAPIs = () => {
             measured in Rambox, Grammarly's `managed.get(null)` came back holding its alarms, its
             cached config and the active tab's URL.
 
-            And every read took a round trip to the main process. Grammarly asks for three policy keys
-            while its service worker starts and races each one against a 3s timeout; under the load of
-            twenty extensions booting, the reply lost that race on every single launch
-            ("Manage storage timeout to get \"GrammarlyExtensionMode\"", three times per start).
-            Measured with the worker's event loop blocked past the deadline: the IPC answer never
-            arrives and the timer wins, while an answer resolved in a microtask lands the instant the
-            loop frees up. So this area never leaves the renderer.
+            And every read took a round trip to the main process, which a caller can lose. Real
+            extensions race a policy read against a timeout — Grammarly gives it 3s — and measured
+            with the worker's event loop blocked past such a deadline, the IPC answer never arrives
+            and the timer wins, while an answer resolved in a microtask lands the instant the loop
+            frees up. There is nothing to fetch here, so this area never leaves the renderer.
+
+            (That measurement is NOT a diagnosis of Grammarly's own "Manage storage timeout" errors:
+            its `get`, copied verbatim into its own worker, resolves in 0 ms across the exact window
+            where its calls expire. This change does not stop them. See
+            docs/EXTENSION_CATALOG_HEALTH.md in the Rambox monorepo.)
 
             `sync` still aliases `local`: it is a real read/write store, and backing it with local data
             is what an extension expects to find in it.
