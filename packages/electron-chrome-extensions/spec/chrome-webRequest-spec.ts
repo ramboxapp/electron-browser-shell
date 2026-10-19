@@ -27,17 +27,21 @@ describe('chrome.webRequest', () => {
     })
   })
 
-  // Upstream Electron 43 regression: chrome.webRequest's event objects are
-  // undefined ("No source for require(webRequestEvent)"), so the native
-  // observation/blocking layer is dead — reproduced on stock 43.0.0 and
-  // still present in 43.1.1. The renderer preload fills the missing events
-  // with inert stubs so extensions survive startup (see "Repair
-  // chrome.webRequest's event objects" in src/renderer/index.ts), but
-  // listeners registered on a stub never fire. These specs assert the
-  // version-appropriate behavior: real observation/blocking on <=42, alive
-  // but inert on 43. If the >=43 branches start failing, Electron fixed the
-  // regression upstream — remove the shim and flip these back.
-  const nativeWebRequestBroken = parseInt(process.versions.electron, 10) >= 43
+  // Upstream regression confined to Electron 43: chrome.webRequest's event objects are undefined
+  // ("No source for require(webRequestEvent)"), so the native observation/blocking layer is dead —
+  // reproduced on stock 43.0.0 and still present in 43.1.1. The renderer preload fills the missing
+  // events with inert stubs so extensions survive startup (see "Repair chrome.webRequest's event
+  // objects" in src/renderer/index.ts), but listeners registered on a stub never fire.
+  //
+  // 44 fixes it, measured on castlabs 44.5.1: the whole suite was run against that binary and these
+  // two were the ONLY failures — they were asserting the breakage, which is exactly how a spec
+  // should announce that upstream caught up. The 80 "No source for require(...)" errors Electron 43
+  // logs across the catalog's twenty extensions drop to zero there too.
+  //
+  // So the window is 43 alone, and the shim needs no version check of its own: it only fills events
+  // that are undefined, which on 44 is none of them.
+  const major = parseInt(process.versions.electron, 10)
+  const nativeWebRequestBroken = major === 43
 
   describe('onBeforeRequest (native)', () => {
     it(`observes requests made by a page (${nativeWebRequestBroken ? 'inert on Electron 43, upstream regression' : 'native'})`, async () => {
