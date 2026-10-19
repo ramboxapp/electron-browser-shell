@@ -66,6 +66,8 @@ export const useExtensionBrowser = (opts: {
   extensionPath?: () => string
   openDevTools?: boolean
   assignTabDetails?: ChromeExtensionImpl['assignTabDetails']
+  /** Merged into the window's webPreferences — `webviewTag` for specs that need a real guest. */
+  webPreferences?: Electron.WebPreferences
 }) => {
   let w: Electron.BrowserWindow
   let extensions: ElectronChromeExtensions
@@ -102,7 +104,12 @@ export const useExtensionBrowser = (opts: {
 
     w = new BrowserWindow({
       show: false,
-      webPreferences: { session: customSession, nodeIntegration: false, contextIsolation: true },
+      webPreferences: {
+        session: customSession,
+        nodeIntegration: false,
+        contextIsolation: true,
+        ...opts.webPreferences,
+      },
     })
 
     if (process.env.SPEC_LOG_CONSOLE) {
