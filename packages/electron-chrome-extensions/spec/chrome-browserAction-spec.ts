@@ -241,6 +241,35 @@ describe('chrome.browserAction', () => {
       expect(extensionIds).to.deep.equal([browser.extension.id])
     })
 
+    /*
+      The buttons have to be allowed to wrap, because an embedder shows this list inside a panel of
+      its own width. Rambox's panel is 320px and anchored to its toolbar button; with the 20
+      extensions of its catalog enabled the list was 665px in one row, so the last five buttons sat
+      past the right edge of the window — unreachable with a mouse at any window width. The width cap
+      is the host's to set; what the element owes it is the ability to use a second row.
+    */
+    it('lets its buttons wrap when the host constrains the width', async () => {
+      await browser.webContents.loadFile(path.join(basePath, 'default.html'))
+      // The list renders its buttons asynchronously, same reason getExtensionActionIds waits.
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      const wraps = await browser.webContents.executeJavaScript(
+        `(${() => {
+          const list = document.querySelector('browser-action-list')!
+          list.setAttribute('style', 'max-width: 60px')
+          const style = getComputedStyle(list)
+          const actions = list.shadowRoot!.querySelectorAll('.action')
+          const rows = new Set(Array.from(actions).map((a) => a.getBoundingClientRect().y))
+          return {
+            flexWrap: style.flexWrap,
+            overflows: list.scrollWidth > list.clientWidth,
+            rows: rows.size,
+          }
+        }})();`,
+      )
+      expect(wraps.flexWrap, 'the list must be allowed to use a second row').to.equal('wrap')
+      expect(wraps.overflows, 'the list overflowed its own width instead of wrapping').to.be.false
+    })
+
     it('removes action for unloaded extension', async () => {
       await browser.webContents.loadFile(path.join(basePath, 'default.html'))
       expect(browser.session.getExtension(browser.extension.id)).to.be.an('object')
