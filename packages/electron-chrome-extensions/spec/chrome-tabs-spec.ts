@@ -32,9 +32,18 @@ describe('chrome.tabs', () => {
   })
 
   describe('getCurrent()', () => {
-    it('gets details of the active tab', async () => {
+    it('is undefined in a service worker, as in Chrome', async () => {
+      /*
+        getCurrent answers "the tab you are running in", not "the active tab". Chrome returns
+        undefined outside of a tab — from a service worker, a popup, or an extension page that is not
+        itself a tab — and this used to hand everyone the active tab of the current window instead, so
+        an extension asking "which tab am I?" from its worker got an answer and acted on it.
+        `browser.crx.exec` runs in the fixture's service worker, which is exactly that context.
+      */
       const result = await browser.crx.exec('tabs.getCurrent')
-      expect(result).to.be.an('object')
+      // The fixture relays the reply over IPC, which turns undefined into null; what matters is that
+      // no tab object comes back, which is what an extension branches on.
+      expect(result == null, `getCurrent answered ${JSON.stringify(result)}`).to.be.true
     })
   })
 

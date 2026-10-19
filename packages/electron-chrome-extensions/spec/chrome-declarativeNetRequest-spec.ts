@@ -1,4 +1,5 @@
 import { expect } from 'chai'
+import { webContents } from 'electron'
 
 import { useExtensionBrowser, useServer } from './hooks'
 
@@ -65,6 +66,42 @@ describe('chrome.declarativeNetRequest', () => {
       expect(stored[0].id).to.equal(101)
 
       expect(await fetchResult('dnr-dynamic-blocked')).to.equal('blocked')
+    })
+  })
+
+  /*
+    The same static ruleset, from a webContents that is NOT a window's own — which is what a tab is in
+    an embedder like Rambox: a <webview>/offscreen webContents registered through addTab(). uBlock
+    25.5.0 reports its three manifest rulesets as enabled in Rambox and blocks nothing at all there,
+    while the window-level spec above passes, so the question is whether Chromium's DNR engine filters
+    requests from this kind of webContents too.
+  */
+  describe('static rulesets from a tab webContents (the <webview> case)', () => {
+    it('enforces the ruleset for a webContents registered with addTab', async () => {
+      let enabled: string[] = []
+      for (let i = 0; i < 40 && !enabled.includes('static_block'); i++) {
+        enabled = await getEnabledRulesets()
+        if (!enabled.includes('static_block')) await new Promise((r) => setTimeout(r, 50))
+      }
+      expect(enabled).to.include('static_block')
+
+      // Same session as the extension host, or addTab rejects it outright.
+      const tab = (webContents as any).create({ sandbox: true, session: browser.session })
+      browser.extensions.addTab(tab, browser.window)
+      browser.extensions.selectTab(tab)
+      await tab.loadURL(server.getUrl())
+
+      const fetchFromTab = (marker: string) =>
+        tab.executeJavaScript(
+          `fetch('${server.getUrl()}${marker}').then(() => 'fetched', () => 'blocked')`,
+        ) as Promise<'fetched' | 'blocked'>
+
+      try {
+        expect(await fetchFromTab('dnr-static-blocked')).to.equal('blocked')
+        expect(await fetchFromTab('dnr-static-allowed')).to.equal('fetched')
+      } finally {
+        if (!tab.isDestroyed()) tab.destroy()
+      }
     })
   })
 

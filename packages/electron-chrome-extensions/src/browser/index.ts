@@ -325,6 +325,29 @@ export class ElectronChromeExtensions extends EventEmitter {
   }
 
   /**
+   * The commands an extension declared in its manifest, each with the shortcut it asks for.
+   *
+   * Here so an embedder can bind keyboard shortcuts for extensions: this library does not register
+   * accelerators of its own, because they compete with the host application's and only the host knows
+   * which ones it is willing to give up.
+   * @see https://developer.chrome.com/docs/extensions/reference/api/commands
+   */
+  getCommands(extensionId: string) {
+    return this.api.commands.getCommands(extensionId)
+  }
+
+  /**
+   * Fire `chrome.commands.onCommand` for an extension, the way a keypress would.
+   *
+   * Returns false when the extension never declared that command, so a typo is distinguishable from a
+   * delivered event. `_execute_action` is not dispatched: in Chrome it opens the popup, which is the
+   * toolbar-click path the host already drives.
+   */
+  dispatchCommand(extensionId: string, command: string, tab?: chrome.tabs.Tab) {
+    return this.api.commands.dispatch(extensionId, command, tab)
+  }
+
+  /**
    * Add webContents to be tracked as an extension host which will receive
    * extension events when a chrome-extension:// resource is loaded.
    *

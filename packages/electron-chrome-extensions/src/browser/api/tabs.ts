@@ -189,8 +189,17 @@ export class TabsAPI {
     return tabs.map(this.getTabDetails.bind(this))
   }
 
+  /**
+   * The tab the caller is running in — not "the active tab".
+   *
+   * Chrome answers `undefined` outside of a tab: from a service worker, from a popup, from an
+   * extension page that is not itself a tab. This used to return the active tab of the current window
+   * to everyone, so an extension asking "which tab am I?" from its worker got a tab object and acted
+   * on it. Measured against a real Chromium, where the same call in a service worker is `undefined`.
+   */
   private getCurrent(event: ExtensionEvent) {
-    const tab = this.ctx.store.getActiveTabOfCurrentWindow()
+    if (event.type !== 'frame') return undefined
+    const tab = this.ctx.store.tabs.has(event.sender) ? event.sender : undefined
     return tab ? this.getTabDetails(tab) : undefined
   }
 

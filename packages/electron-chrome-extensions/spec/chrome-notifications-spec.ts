@@ -46,11 +46,14 @@ describe('chrome.notifications', () => {
   })
 
   describe('getAll()', () => {
-    it('lists created notification', async () => {
+    it('lists created notifications as an object keyed by id, as in Chrome', async () => {
       const notificationId = uuid()
       await browser.crx.exec('notifications.create', notificationId, basicOpts)
-      const list = await browser.crx.exec('notifications.getAll')
-      expect(list).to.deep.equal([notificationId])
+      const all = await browser.crx.exec('notifications.getAll')
+      // An array here is the bug: `Object.keys(await getAll())` — what an extension actually writes —
+      // comes back empty from one, so every notification is invisible to its own owner.
+      expect(all).to.deep.equal({ [notificationId]: true })
+      expect(Object.keys(all)).to.deep.equal([notificationId])
       await browser.crx.exec('notifications.clear', notificationId)
     })
   })

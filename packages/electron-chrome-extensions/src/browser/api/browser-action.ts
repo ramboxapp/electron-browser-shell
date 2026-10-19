@@ -101,6 +101,19 @@ export class BrowserActionAPI {
           result = action[propName]
         }
 
+        /*
+          Chrome answers these with an empty string when nothing is set, never with undefined. An
+          extension that renders its own badge or title puts the answer straight into the DOM, so
+          `undefined` shows up as the text "undefined" — measured on uBlock, whose badge count came
+          back undefined rather than ''.
+        */
+        if (
+          result === undefined &&
+          (propName === 'text' || propName === 'title' || propName === 'popup')
+        ) {
+          return ''
+        }
+
         return result
       }
 

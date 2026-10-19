@@ -76,6 +76,17 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     // Reports what the `browser` global looks like from inside the service worker. Electron defines
     // one holding only its natively implemented namespaces, and cross-browser extensions prefer it
     // over `chrome`, so anything this library injects has to be mirrored onto it too.
+    // Resolves with the first commands.onCommand this worker receives, so a spec can prove the event
+    // fires rather than just that addListener accepted a function.
+    case 'await-command': {
+      const onCommand = (command, tab) => {
+        chrome.commands.onCommand.removeListener(onCommand)
+        reply({ command, tabId: tab && tab.id })
+      }
+      chrome.commands.onCommand.addListener(onCommand)
+      break
+    }
+
     case 'browser-global': {
       const globalBrowser = globalThis.browser
       reply({

@@ -22,5 +22,28 @@
     }
   ],
   "permissions": ["alarms", "idle", "offscreen", "scripting", "storage", "tabs", "webRequest"],
-  "host_permissions": ["<all_urls>"]
+  "host_permissions": ["<all_urls>"],
+  "commands": {
+    "autofill_login": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+L",
+        "mac": "Command+Shift+L"
+      },
+      "description": "Autofill the login"
+    },
+    "lock_vault": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+K"
+      },
+      "description": "Lock the vault"
+    },
+    "no_shortcut": {
+      "description": "A command with no suggested key"
+    },
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y"
+      }
+    }
+  }
 }

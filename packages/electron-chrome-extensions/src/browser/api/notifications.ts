@@ -145,10 +145,18 @@ export class NotificationsAPI {
     return id
   }
 
+  /**
+   * Chrome resolves with an OBJECT keyed by notification id, not an array.
+   *
+   * This returned an array, so the idiomatic `Object.keys(await getAll())` an extension writes came
+   * back empty — every notification invisible to its own owner, with nothing to log.
+   */
   private getAll = ({ extension }: ExtensionEvent) => {
-    return Array.from(this.registry.keys())
-      .filter((key) => key.startsWith(extension.id))
-      .map(stripScopeFromIdentifier)
+    const notifications: Record<string, true> = {}
+    for (const key of this.registry.keys()) {
+      if (key.startsWith(extension.id)) notifications[stripScopeFromIdentifier(key)] = true
+    }
+    return notifications
   }
 
   private getPermissionLevel = (event: ExtensionEvent) => {

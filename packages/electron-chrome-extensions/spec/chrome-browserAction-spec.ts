@@ -158,6 +158,27 @@ describe('chrome.browserAction', () => {
       })
     }
 
+    /*
+      Chrome answers these with an empty string when nothing is set, never with undefined. An
+      extension that renders its own badge or title puts the answer straight into the DOM, where
+      undefined shows up as the literal text "undefined". Measured on uBlock in Rambox, whose badge
+      count came back undefined.
+    */
+    it("answers '' rather than undefined when nothing is set", async () => {
+      for (const [method, detail] of [
+        ['BadgeText', 'text'],
+        ['Popup', 'popup'],
+      ]) {
+        await browser.crx.exec(`browserAction.set${method}`, { [detail]: null })
+        const result = await browser.crx.exec(`browserAction.get${method}`)
+        expect(result, `get${method} with nothing set`).to.equal('')
+      }
+      // Title is different on purpose: the manifest declares default_title, and Chrome answers with
+      // it rather than with an empty string.
+      await browser.crx.exec('browserAction.setTitle', { title: null })
+      expect(await browser.crx.exec('browserAction.getTitle')).to.equal('RPC')
+    })
+
     it('uses custom popup when opening browser action', async () => {
       const popupUuid = uuid()
       const popupPath = `popup.html?${popupUuid}`
