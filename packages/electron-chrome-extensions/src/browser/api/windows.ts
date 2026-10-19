@@ -100,9 +100,28 @@ export class WindowsAPI {
     return this.getWindowDetails(win)
   }
 
+  /**
+   * Chrome never resolves these to null. `windows.getCurrent()` and `windows.getLastFocused()`
+   * either give a window or reject ("No current window"), so extensions dereference the result
+   * straight away — Grammarly 14.1339.0 does `getCurrent().then((w) => w.focused)` from inside its
+   * own `windows.onFocusChanged` handler and dies on the dereference. Resolving null is a shape
+   * Chrome never produces, so nobody guards against it.
+   *
+   * An embedder can legitimately have windows but no FOCUSED one: Rambox registers a window with
+   * the extensions layer lazily, and until then nothing is "last focused" while the app plainly has
+   * a window. Falling back to any known window keeps the common case working and keeps the answer
+   * truthful. With no window at all, Chrome would reject — which is not reachable from here, for
+   * the reason the comment below the fallback gives.
+   */
   private getLastFocused(event: ExtensionEvent) {
-    const win = this.ctx.store.getLastFocusedWindow()
-    return win ? this.getWindowDetails(win) : null
+    const win =
+      this.ctx.store.getLastFocusedWindow() ?? this.ctx.store.windows.values().next().value
+    // Same shape `get()` answers with above when it cannot find the window, and for the same reason:
+    // throwing here does not reach the caller as a rejection — the result comes back `undefined`,
+    // which crashes the extension exactly like the `null` this replaced. A window-shaped object with
+    // no id lets `w.focused` read false and the extension carry on.
+    if (!win) return { id: WindowsAPI.WINDOW_ID_NONE, focused: false }
+    return this.getWindowDetails(win)
   }
 
   private getAll(event: ExtensionEvent) {
