@@ -30,6 +30,17 @@ const transformArgs = (args, sender) => {
   return args.map(transformArg)
 }
 
+/*
+  The background half of http-matches-content-script.js: a port and a one-shot message, which is how
+  a content script talks to its own extension. A content script that cannot reach its background
+  looks, from the page, exactly like one that never ran.
+*/
+chrome.runtime.onConnect.addListener((port) => {
+  port.onMessage.addListener(() => {
+    port.postMessage({ reply: 'pong' })
+  })
+})
+
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
   switch (message.type) {
     case 'api': {
@@ -134,6 +145,11 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         reply(out)
       })()
       return true
+    }
+
+    case 'content-script-ping': {
+      reply({ reply: 'pong' })
+      break
     }
 
     case 'browser-global': {
