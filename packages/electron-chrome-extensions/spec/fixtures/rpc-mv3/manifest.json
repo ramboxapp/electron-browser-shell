@@ -72,7 +72,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["page-script.js"],
+      "resources": ["page-script.js", "worker-script.js"],
       "matches": ["<all_urls>"]
     }
   ]

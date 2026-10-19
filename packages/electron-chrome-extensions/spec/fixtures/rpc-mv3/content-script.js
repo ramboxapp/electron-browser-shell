@@ -88,10 +88,38 @@ async function reportStorage() {
   sendIpc('success', result)
 }
 
+// A dedicated Worker from an extension file: how an extension does heavy work (crypto, zip) off
+// the page's thread. The script has to be web-accessible for the page's world to load it.
+async function startWorker() {
+  try {
+    const worker = new Worker(chrome.runtime.getURL('worker-script.js'))
+    const echo = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('no answer in 5s')), 5000)
+      worker.addEventListener('message', (event) => {
+        clearTimeout(timer)
+        resolve(event.data)
+      })
+      worker.addEventListener('error', (event) => {
+        clearTimeout(timer)
+        reject(new Error(event.message || 'worker error'))
+      })
+      worker.postMessage('ping')
+    })
+    worker.terminate()
+    sendIpc('success', { ok: true, echo })
+  } catch (error) {
+    sendIpc('success', { ok: false, error: String((error && error.message) || error) })
+  }
+}
+
 window.addEventListener('message', (event) => {
   const data = event.data
   if (data && data.type === 'content-script-storage') {
     reportStorage()
+    return
+  }
+  if (data && data.type === 'content-script-worker') {
+    startWorker()
     return
   }
   // Relay any command posted by the test runner to the background/service

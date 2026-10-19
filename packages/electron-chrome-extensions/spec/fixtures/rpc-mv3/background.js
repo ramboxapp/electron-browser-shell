@@ -1,5 +1,19 @@
 /* global chrome */
 
+/*
+  importScripts during the worker's initial evaluation, which is the only time a service worker
+  allows it — and how a real extension pulls in its heavy chunks (Dashlane loads its argon2,
+  libsodium and opaque modules exactly this way, inside a try that swallows any failure).
+*/
+self.__crxImportResult = (() => {
+  try {
+    importScripts('imported-chunk.js')
+    return self.__crxImportedChunk === 'loaded' ? 'loaded' : 'ran but set nothing'
+  } catch (error) {
+    return 'threw: ' + ((error && error.message) || error)
+  }
+})()
+
 const sendIpc = ({ tabId, name }) => {
   chrome.tabs.sendMessage(tabId, { type: 'send-ipc', args: [name] })
 }
@@ -153,6 +167,11 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         reply(error ? { lastError: error.message } : response)
       })
       return true
+    }
+
+    case 'import-scripts': {
+      reply({ result: self.__crxImportResult, chunk: typeof self.__crxImportedChunk })
+      break
     }
 
     case 'content-script-ping': {
