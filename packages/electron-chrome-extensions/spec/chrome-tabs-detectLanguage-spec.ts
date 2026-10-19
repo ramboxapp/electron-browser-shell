@@ -95,4 +95,12 @@ describe('chrome.tabs.detectLanguage', () => {
   it("answers 'und' for a tab that does not exist", async () => {
     expect(await browser.crx.exec('tabs.detectLanguage', 999999)).to.equal('und')
   })
+
+  it('treats a tabId of 0 as a tabId, not as none given', async () => {
+    // Electron's webContents ids start at 1, so tab 0 never exists and the honest answer is 'und'.
+    // A truthiness check would quietly answer about the ACTIVE tab instead, which is a wrong answer
+    // rather than a missing one — and the page below declares Spanish, so the two answers differ.
+    await browser.window.webContents.loadURL(`${url}/es`)
+    expect(await browser.crx.exec('tabs.detectLanguage', 0)).to.equal('und')
+  })
 })

@@ -324,9 +324,13 @@ export class TabsAPI {
    * and Google Translate (1).
    */
   private async detectLanguage(event: ExtensionEvent, tabId?: number) {
-    const tab = tabId
-      ? this.ctx.store.getTabById(tabId)
-      : this.ctx.store.getActiveTabOfCurrentWindow()
+    // `typeof`, not truthiness, the way reload() and update() below decide: a tabId of 0 is a tabId,
+    // and treating it as "none given" would answer about the active tab instead. Unreachable while
+    // Electron's webContents ids start at 1, which is exactly how long such a thing stays quiet.
+    const tab =
+      typeof tabId === 'number'
+        ? this.ctx.store.getTabById(tabId)
+        : this.ctx.store.getActiveTabOfCurrentWindow()
     if (!tab || tab.isDestroyed()) return 'und'
 
     let declared = ''
