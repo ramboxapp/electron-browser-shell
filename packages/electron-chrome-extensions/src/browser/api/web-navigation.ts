@@ -34,12 +34,32 @@ const getFrameType = (frame: Electron.WebFrameMain) =>
 // TODO(mv3): add WebFrameMain API to retrieve this
 const getDocumentLifecycle = (frame: Electron.WebFrameMain): DocumentLifecycle => 'active' as const
 
+/*
+  `documentId` is left OUT rather than filled with a placeholder.
+
+  It used to be the string 'not-implemented', which is worse than absent: `tabs.sendMessage` is
+  Chromium's own, so `{ documentId: 'not-implemented' }` addresses a document that cannot exist and
+  the message is delivered nowhere, silently. Real extensions choose between the two addressing
+  modes exactly the way the API invites — Keeper 18.2.0 does
+  `sendMessage(tabId, msg, documentId !== undefined ? { documentId } : { frameId })` — so a defined
+  placeholder sends every one of those messages into the void, while an undefined one makes them
+  fall back to `frameId`, which works here.
+
+  Measured against a stock Chromium with the same extension: there the in-field prompt opens and
+  stays, and the sequence continues past `restoreLocks` with the `setVisibility` that shows it. In
+  Rambox the sequence stopped at `restoreLocks`.
+
+  Implementing real document ids means minting one per document and resolving it back in the
+  messaging path, which is Electron's to expose; until then, absent is the honest answer.
+*/
 const getFrameDetails = (
   frame: Electron.WebFrameMain,
 ): chrome.webNavigation.GetFrameResultDetails => ({
   // TODO(mv3): implement new properties
   url: frame.url,
-  documentId: 'not-implemented',
+  // The type insists on it; undefined is the value, and it does not survive the trip to the
+  // extension at all, which is the point.
+  documentId: undefined as unknown as string,
   documentLifecycle: getDocumentLifecycle(frame),
   errorOccurred: false,
   frameType: getFrameType(frame),

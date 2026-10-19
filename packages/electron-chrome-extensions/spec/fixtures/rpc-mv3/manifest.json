@@ -45,7 +45,16 @@
       "world": "MAIN"
     }
   ],
-  "permissions": ["alarms", "idle", "offscreen", "scripting", "storage", "tabs", "webRequest"],
+  "permissions": [
+    "alarms",
+    "idle",
+    "offscreen",
+    "scripting",
+    "storage",
+    "tabs",
+    "webRequest",
+    "webNavigation"
+  ],
   "host_permissions": ["<all_urls>"],
   "commands": {
     "autofill_login": {

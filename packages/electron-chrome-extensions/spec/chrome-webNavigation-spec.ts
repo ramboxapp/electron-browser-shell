@@ -55,3 +55,36 @@ describe('chrome.webNavigation', () => {
     expect(eventLog).to.deep.equal(expectedEventLog)
   })
 })
+
+/*
+  A placeholder documentId is worse than none.
+
+  `tabs.sendMessage` is Chromium's own, so `{ documentId: 'not-implemented' }` addresses a document
+  that cannot exist and the message goes nowhere, silently. Extensions pick between the addressing
+  modes the way the API invites — Keeper 18.2.0 does
+  `sendMessage(tabId, msg, documentId !== undefined ? { documentId } : { frameId })` — so what is
+  reported here decides whether every one of those messages is deliverable. Measured against a stock
+  Chromium with the same extension: there its in-field prompt opens and stays.
+
+  This lives on the rpc fixture rather than the webNavigation one because only that fixture answers
+  arbitrary API calls.
+*/
+describe('chrome.webNavigation frame details', () => {
+  const server = useServer()
+  const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc-mv3' })
+
+  it('reports no documentId rather than a placeholder', async () => {
+    const tabs: any[] = await browser.crx.exec('tabs.query', {})
+    expect(tabs, 'the extension saw no tabs').to.be.an('array').that.is.not.empty
+    const frames: any[] = await browser.crx.exec('webNavigation.getAllFrames', {
+      tabId: tabs[0].id,
+    })
+    expect(frames, 'getAllFrames answered nothing').to.be.an('array').that.is.not.empty
+    for (const frame of frames) {
+      expect(frame.documentId, `documentId was ${JSON.stringify(frame.documentId)}`).to.be.oneOf([
+        undefined,
+        null,
+      ])
+    }
+  })
+})
