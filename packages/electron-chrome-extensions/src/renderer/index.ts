@@ -1141,6 +1141,9 @@ export const injectExtensionAPIs = () => {
               }
             },
             captureVisibleTab: invokeExtension('tabs.captureVisibleTab'),
+            // Electron has no detectLanguage of its own, so without this the method is simply
+            // absent and a call throws. Two extensions in Rambox's catalog make one.
+            detectLanguage: invokeExtension('tabs.detectLanguage'),
             get: invokeExtension('tabs.get'),
             getCurrent: invokeExtension('tabs.getCurrent'),
             getAllInWindow: invokeExtension('tabs.getAllInWindow'),

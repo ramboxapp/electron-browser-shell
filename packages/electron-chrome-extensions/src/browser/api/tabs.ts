@@ -42,6 +42,7 @@ export class TabsAPI {
     handle('tabs.remove', this.remove.bind(this))
     handle('tabs.goForward', this.goForward.bind(this))
     handle('tabs.goBack', this.goBack.bind(this))
+    handle('tabs.detectLanguage', this.detectLanguage.bind(this))
 
     this.ctx.store.on('tab-added', this.observeTab.bind(this))
   }
@@ -307,6 +308,57 @@ export class TabsAPI {
         return tab
       })
     return filteredTabs
+  }
+
+  /**
+   * The language of a tab's content.
+   *
+   * Chrome runs CLD over the page's text. Electron exposes nothing like it, so this reads what the
+   * page DECLARES — `<html lang>`, then a `content-language` meta — and answers `'und'` when it
+   * declares nothing. `'und'` is Chrome's own answer for "could not determine", so a caller written
+   * against Chrome already handles it.
+   *
+   * That makes this a weaker detector, not a different contract: it never invents a language. The
+   * alternative was what the library did before, which is not have the method at all — in Rambox's
+   * catalog that threw `chrome.tabs.detectLanguage is not a function` for Dashlane (3 call sites)
+   * and Google Translate (1).
+   */
+  private async detectLanguage(event: ExtensionEvent, tabId?: number) {
+    const tab = tabId
+      ? this.ctx.store.getTabById(tabId)
+      : this.ctx.store.getActiveTabOfCurrentWindow()
+    if (!tab || tab.isDestroyed()) return 'und'
+
+    let declared = ''
+    try {
+      declared = await tab.executeJavaScript(
+        `(function () {
+          var lang = document.documentElement && document.documentElement.getAttribute('lang')
+          if (lang) return lang
+          var meta = document.querySelector('meta[http-equiv="content-language" i]')
+          return (meta && meta.getAttribute('content')) || ''
+        })()`,
+        false,
+      )
+    } catch {
+      // A page that is gone, or one that refuses script, is simply undetermined.
+      return 'und'
+    }
+
+    return TabsAPI.normalizeLanguage(declared)
+  }
+
+  /**
+   * A declared language in the shape Chrome reports: the language subtag lowercased, the region
+   * uppercased (`EN_us` and `en-us` both read `en-US`), and only the first entry of a list.
+   */
+  private static normalizeLanguage(declared: unknown): string {
+    if (typeof declared !== 'string') return 'und'
+    const first = declared.split(',')[0]?.trim().replace(/_/g, '-') ?? ''
+    const match = /^([a-z]{2,3})(?:-([a-z0-9]{2,8}))?$/i.exec(first)
+    if (!match) return 'und'
+    const [, language, region] = match
+    return region ? `${language.toLowerCase()}-${region.toUpperCase()}` : language.toLowerCase()
   }
 
   private reload(event: ExtensionEvent, arg1?: unknown, arg2?: unknown) {
