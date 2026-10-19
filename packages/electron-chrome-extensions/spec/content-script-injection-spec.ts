@@ -75,9 +75,10 @@ describe('content script injection', () => {
   })
 
   it('runs EVERY main-world entry, not just the first', async () => {
-    // Dashlane declares three. In Rambox only the first ran, so its shadow-DOM and top-layer page
-    // scripts never patched the page and its form classifier never got the handshake it waits on:
-    // the extension looked alive and quietly did nothing on every login form.
+    // Written while chasing a Dashlane that declares three of these and did nothing in Rambox. The
+    // hypothesis was that only the first ran; the oracle then ruled it out (the same extension marks
+    // the same form in a real Chromium, in plain Electron and in a guest alike). The coverage stays
+    // because nothing tested it and a password manager's autofill rides on it.
     expect(await attr('data-crx-main-world-first'), 'the first main-world entry').to.equal('ran')
     expect(await attr('data-crx-main-world-second'), 'the second main-world entry').to.equal('ran')
     expect(
@@ -87,9 +88,10 @@ describe('content script injection', () => {
   })
 
   it('matches on any pattern of an entry, not only the first', async () => {
-    // Dashlane's shadow-DOM entry lists http first and https second; on an https page only the
-    // entries whose FIRST pattern matched ran. This is that shape with the schemes swapped, so it
-    // fails the same way without needing TLS in the harness.
+    // Dashlane's shadow-DOM entry lists http first and https second, and on an https page it did
+    // not run while a sibling entry listing https first did — which looked like only matches[0]
+    // being honoured. It is not: this reproduces that shape (schemes swapped, so no TLS is needed)
+    // and passes. Kept as coverage for a rule nothing else pins down.
     expect(await attr('data-crx-second-pattern')).to.equal('ran')
   })
 
@@ -118,8 +120,9 @@ describe('content script injection', () => {
 
   it('delivers a tabs.sendMessage from the background to the content script', async () => {
     // The direction an extension uses to tell a page to act: autofill is the background deciding
-    // and the content script doing. Measured in Rambox, Dashlane's background logs "Could not
-    // establish connection. Receiving end does not exist." and its content script never acts.
+    // and the content script doing. Dashlane's background logs "Could not establish connection.
+    // Receiving end does not exist." in Rambox, which is what sent me here — measured afterwards,
+    // delivery works there too, so that log is not the failure. Untested before this either way.
     const reply: any = await browser.crx.raw({
       type: 'tabs-send-message',
       tabId: browser.window.webContents.id,
@@ -213,8 +216,8 @@ describe('content script injection in a <webview> guest', () => {
   })
 
   it('runs every main-world entry inside the guest too', async () => {
-    // The shape Rambox serves. Measured there with the real Dashlane: of its three main-world
-    // entries only the first patched the page, which is why its classifier never started.
+    // The shape Rambox serves, which is where the question came from. Both halves hold here, so a
+    // main-world entry is not what Dashlane was missing — see EXTENSION_CATALOG_HEALTH.md.
     expect(await guestAttr('data-crx-main-world-first'), 'the first main-world entry').to.equal(
       'ran',
     )
