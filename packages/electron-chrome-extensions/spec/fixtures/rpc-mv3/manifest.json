@@ -47,6 +47,7 @@
   ],
   "permissions": [
     "alarms",
+    "privacy",
     "idle",
     "offscreen",
     "scripting",

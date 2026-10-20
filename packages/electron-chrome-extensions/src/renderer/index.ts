@@ -253,13 +253,62 @@ export const injectExtensionAPIs = () => {
       }
     }
 
-    // chrome.types.ChromeSetting<any>
+    /*
+      `chrome.types.ChromeSetting<any>`, answering the way Chrome's does: a promise when no callback
+      is given, the callback when there is one.
+
+      The three methods used to return `undefined`, which is worse than it looks. An extension that
+      writes `chrome.privacy.services.passwordSavingEnabled.get({}).then(…)` gets a TypeError for
+      reading 'then' of undefined — and when that call sits in a comma-sequenced run of start-up
+      calls, as it does in NordPass 7.11.9, the throw takes the whole background init with it: the
+      rest of its boot never runs, its state machine stays at LOADING, and the extension shows its
+      loading spinner forever with nothing in the console. Measured against a stock Chromium, where
+      the same call answers `{ value: false, levelOfControl: 'not_controllable' }` and the extension
+      boots.
+
+      `not_controllable` is the honest answer rather than a convenient one: these are Chrome profile
+      preferences, Electron exposes no way to read or write them, and nothing here pretends a `set`
+      took effect. An extension that checks the level before writing — again, as NordPass does —
+      then correctly leaves the setting alone instead of fighting a write that goes nowhere.
+    */
     class ChromeSetting {
-      set() {}
-      get() {}
-      clear() {}
+      // The value Chrome reports for a setting no extension controls. Per setting, because
+      // `webRTCIPHandlingPolicy` is a string and the rest are booleans. Kept in a closure rather
+      // than on the instance so `Object.keys(setting)` shows what Chrome's shows and nothing more.
+      private readonly defaultValue!: () => unknown
+      constructor(defaultValue: unknown = false) {
+        Object.defineProperty(this, 'defaultValue', {
+          value: () => defaultValue,
+          enumerable: false,
+        })
+      }
+
+      private answer<T>(callback: unknown, value: T) {
+        if (typeof callback === 'function') {
+          ;(callback as (result: T) => void)(value)
+          return undefined
+        }
+        return Promise.resolve(value)
+      }
+
+      get(_details?: unknown, callback?: unknown) {
+        return this.answer(callback, {
+          value: this.defaultValue(),
+          levelOfControl: 'not_controllable',
+        })
+      }
+      set(_details?: unknown, callback?: unknown) {
+        return this.answer(callback, undefined)
+      }
+      clear(_details?: unknown, callback?: unknown) {
+        return this.answer(callback, undefined)
+      }
+      // Nothing ever changes these, so the event never fires; it still needs the full shape, since
+      // an extension that adds a listener on start-up usually removes it on teardown.
       onChange = {
         addListener: () => {},
+        removeListener: () => {},
+        hasListener: () => false,
       }
     }
 
@@ -905,16 +954,17 @@ export const injectExtensionAPIs = () => {
           return {
             ...base,
             network: {
-              networkPredictionEnabled: new ChromeSetting(),
-              webRTCIPHandlingPolicy: new ChromeSetting(),
+              networkPredictionEnabled: new ChromeSetting(false),
+              // The one string setting of the group; 'default' is Chrome's own default policy.
+              webRTCIPHandlingPolicy: new ChromeSetting('default'),
             },
             services: {
-              autofillAddressEnabled: new ChromeSetting(),
-              autofillCreditCardEnabled: new ChromeSetting(),
-              passwordSavingEnabled: new ChromeSetting(),
+              autofillAddressEnabled: new ChromeSetting(false),
+              autofillCreditCardEnabled: new ChromeSetting(false),
+              passwordSavingEnabled: new ChromeSetting(false),
             },
             websites: {
-              hyperlinkAuditingEnabled: new ChromeSetting(),
+              hyperlinkAuditingEnabled: new ChromeSetting(false),
             },
           }
         },

@@ -60,11 +60,18 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
     case 'api': {
       const { method, args } = message
 
-      const [apiName, subMethod] = method.split('.')
+      /*
+        Any depth, not just `api.method`: `chrome.privacy` nests its settings two levels further
+        (`privacy.services.passwordSavingEnabled.get`), and the owner object has to stay the
+        receiver so `this` still works inside the method.
+      */
+      const path = method.split('.')
+      const subMethod = path.pop()
+      const apiObject = path.reduce((object, key) => (object ? object[key] : undefined), chrome)
 
-      if (typeof chrome[apiName][subMethod] === 'function') {
+      if (apiObject && typeof apiObject[subMethod] === 'function') {
         const transformedArgs = transformArgs(args, sender)
-        const ret = chrome[apiName][subMethod](...transformedArgs, reply)
+        const ret = apiObject[subMethod](...transformedArgs, reply)
         // Support promise-only APIs which ignore the callback argument.
         // Skip undefined results so callback-style APIs whose wrapper promise
         // resolves early (e.g. tabs.executeScript) don't clobber the reply.
@@ -176,6 +183,29 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
 
     case 'content-script-ping': {
       reply({ reply: 'pong' })
+      break
+    }
+
+    /*
+      The shape of a chrome.privacy setting, which `api` cannot ask about: what matters is that
+      onChange carries its whole event interface, because an extension that adds a listener on
+      start-up removes it on teardown and a missing removeListener throws there.
+    */
+    case 'privacy-setting-shape': {
+      const setting = chrome.privacy.services.passwordSavingEnabled
+      reply({
+        get: typeof setting.get,
+        set: typeof setting.set,
+        clear: typeof setting.clear,
+        addListener: typeof setting.onChange.addListener,
+        removeListener: typeof setting.onChange.removeListener,
+        hasListener: typeof setting.onChange.hasListener,
+        // Returning a promise is the point: `undefined` here is what broke callers.
+        getReturnsPromise: (() => {
+          const returned = setting.get({})
+          return !!(returned && typeof returned.then === 'function')
+        })(),
+      })
       break
     }
 
