@@ -250,6 +250,39 @@ describe('declarativeNetRequest static ruleset limits', () => {
     )
   })
 
+  /*
+    The budget has to mean something, and this is the assertion that catches it when it stops meaning
+    anything — on any Electron version, without naming a ceiling.
+
+    Measured on Electron 44.5.1 (Chromium 152) with the catalog's blocker: it enables 2,056 rules of
+    its site-fixes list, `getAvailableStaticRuleCount()` answers 387,595, and enabling one of its
+    49,498-rule lists is refused with "The set of enabled rulesets exceeds the rule count limit."
+    Bracketed with cut-down copies of that same list: 30,000 enables, 40,000 is refused — exactly
+    Chrome's GUARANTEED_MINIMUM_STATIC_RULES, which is what an engine without Chrome's 330,000-rule
+    global pool can offer. Electron 43 (what this suite runs) accepts 40,000, and a stock Chromium 155
+    accepts all 100,427 of the blocker's lists and reports 330,000 − 100,427 left.
+
+    So the reported budget is the part that is wrong everywhere: it promises room the engine will not
+    honour, and an extension has no other way to ask. A failure here means the two finally disagree on
+    this version too — look at the ceiling before trusting the number.
+  */
+  it('does not promise static rule budget it then refuses', async () => {
+    const budget = await availableCount()
+    await enable(['bulk'])
+    const list = await enabled()
+    console.log(
+      `[dnr] 'bulk' is 40,000 rules, budget reported before enabling it: ${JSON.stringify(budget)} → enabled: ${JSON.stringify(list)}`,
+    )
+    expect(
+      budget,
+      'the budget did not even cover 40,000 rules, so this version is stricter',
+    ).to.be.at.least(40000)
+    expect(
+      list,
+      `the budget promised ${budget} rules and the engine then refused 40,000 of them`,
+    ).to.include('bulk')
+  })
+
   it('accepts a ruleset bigger than Chrome’s guaranteed minimum', async () => {
     await enable(['bulk'])
     const list = await enabled()
