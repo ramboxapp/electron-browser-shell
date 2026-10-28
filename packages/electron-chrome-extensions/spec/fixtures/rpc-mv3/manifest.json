@@ -49,6 +49,7 @@
     "alarms",
     "privacy",
     "idle",
+    "nativeMessaging",
     "offscreen",
     "scripting",
     "storage",

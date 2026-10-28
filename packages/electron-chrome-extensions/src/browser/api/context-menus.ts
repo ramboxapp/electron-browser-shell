@@ -1,8 +1,17 @@
-import { Menu, MenuItem } from 'electron'
+import { app, Menu, MenuItem } from 'electron'
 import { MenuItemConstructorOptions } from 'electron/main'
 import { ExtensionContext } from '../context'
 import { ExtensionEvent } from '../router'
 import { ContextMenuType, getIconImage, matchesPattern } from './common'
+import { SessionStateFile } from './lib/session-state'
+
+/** An MV3 service worker or an MV2 event page: a background that is not running all the time. */
+const hasLazyBackground = (extension: Electron.Extension) => {
+  const background = extension.manifest?.background
+  if (!background) return false
+  if (background.service_worker) return true
+  return extension.manifest.manifest_version === 2 && background.persistent === false
+}
 
 type ContextItemProps = chrome.contextMenus.CreateProperties & { id: string }
 
@@ -83,6 +92,20 @@ export class ContextMenusAPI {
     Map</* menuItemId */ string, ContextItemProps>
   >()
 
+  /*
+    The items of extensions with a lazy background (an MV3 worker, an MV2 event page), kept across
+    launches the way Chrome keeps them.
+
+    Chrome writes those items to the profile and restores them when the extension loads, which is why
+    extensions create their menu once, in `runtime.onInstalled`, and never again. Here they lived in
+    memory only, so even with onInstalled firing the menu would be gone after the first restart:
+    Google Translate's "Translate" item, created on install, has no other place it is created.
+
+    A persistent background is left out, as Chrome leaves it out: its page runs on every launch and
+    builds its menu again, and restoring the old copy would hand it duplicates.
+  */
+  private persisted: SessionStateFile<Record<string, ContextItemProps[]>>
+
   constructor(private ctx: ExtensionContext) {
     const handle = this.ctx.router.apiHandler()
     handle('contextMenus.create', this.create)
@@ -90,14 +113,43 @@ export class ContextMenusAPI {
     handle('contextMenus.remove', this.remove)
     handle('contextMenus.removeAll', this.removeAll)
 
+    this.persisted = new SessionStateFile(ctx.session, 'context-menus', () => ({}))
+    app.once('will-quit', () => this.persisted.flush())
+
     const sessionExtensions = ctx.session.extensions || ctx.session
     sessionExtensions.on('extension-unloaded', (event, extension) => {
+      // Memory only: the stored copy is what brings the menu back when the extension loads again.
       if (this.menus.has(extension.id)) {
         this.menus.delete(extension.id)
       }
     })
+    sessionExtensions.on('extension-loaded', (_event, extension) => this.restore(extension))
+    for (const extension of sessionExtensions.getAllExtensions()) this.restore(extension)
 
     this.ctx.store.buildMenuItems = this.buildMenuItemsForExtension.bind(this)
+  }
+
+  private restore(extension: Electron.Extension) {
+    if (!hasLazyBackground(extension) || this.menus.has(extension.id)) return
+    const items = this.persisted.get()[extension.id]
+    if (!items?.length) return
+    this.menus.set(extension.id, new Map(items.map((props) => [props.id, props])))
+  }
+
+  /** Writes the extension's current items to the session's record, if its background is lazy. */
+  private persist(extensionId: string) {
+    const sessionExtensions = this.ctx.session.extensions || this.ctx.session
+    const extension = sessionExtensions.getExtension(extensionId)
+    if (!extension || !hasLazyBackground(extension)) return
+    const all = { ...this.persisted.get() }
+    const items = this.menus.get(extensionId)
+    if (items && items.size > 0) {
+      // `onclick` cannot be stored, and a lazy background cannot pass one anyway (Chrome rejects it).
+      all[extensionId] = Array.from(items.values()).map(({ onclick: _onclick, ...props }) => props)
+    } else {
+      delete all[extensionId]
+    }
+    this.persisted.set(all)
   }
 
   private addContextItem(extensionId: string, props: ContextItemProps) {
@@ -107,6 +159,7 @@ export class ContextMenusAPI {
       this.menus.set(extensionId, contextItems)
     }
     contextItems.set(props.id, props)
+    this.persist(extensionId)
   }
 
   private buildMenuItem = (opts: ContextItemConstructorOptions) => {
@@ -315,6 +368,7 @@ export class ContextMenusAPI {
     // The item ID can't be changed by an update
     const { id: _ignored, ...updates } = updateProperties
     items!.set(`${menuItemId}`, { ...props, ...updates })
+    this.persist(extension.id)
   }
 
   private remove = ({ extension }: ExtensionEvent, menuItemId: string) => {
@@ -324,11 +378,13 @@ export class ContextMenusAPI {
       if (items.size === 0) {
         this.menus.delete(extension.id)
       }
+      this.persist(extension.id)
     }
   }
 
   private removeAll = ({ extension }: ExtensionEvent) => {
     this.menus.delete(extension.id)
+    this.persist(extension.id)
   }
 
   /**

@@ -241,6 +241,80 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       break
     }
 
+    /*
+      What runtime.lastError reads inside a callback Chromium fails: a message from the worker that
+      no extension page is open to receive. RoboForm broadcasts to its popup exactly this way and
+      reads lastError to say it handled the failure.
+    */
+    case 'last-error-in-callback': {
+      chrome.runtime.sendMessage({ type: 'nobody-listens' }, () => {
+        const error = chrome.runtime.lastError
+        // Chrome clears it once the callback returns: read again on the next task.
+        setTimeout(() =>
+          reply({
+            lastError: error ? error.message : null,
+            afterCallback: typeof chrome.runtime.lastError,
+          }),
+        )
+      })
+      break
+    }
+
+    /*
+      A native port to a host that is not installed — what every user without the vendor's desktop
+      app gets: RoboForm and 1Password both connect on start. Reports what onDisconnect was called
+      with, and lastError while it ran.
+    */
+    case 'native-port-missing-host': {
+      const port = chrome.runtime.connectNative('com.crx.host.that.is.not.installed')
+      const timer = setTimeout(() => reply({ timedOut: true }), 10e3)
+      port.onDisconnect.addListener((...args) => {
+        clearTimeout(timer)
+        const error = chrome.runtime.lastError
+        reply({
+          argCount: args.length,
+          argIsPort: args[0] === port,
+          lastError: error ? error.message : null,
+        })
+      })
+      break
+    }
+
+    // Whether disconnect() fires onDisconnect on the port that called it. Chrome does not.
+    case 'native-port-own-disconnect': {
+      const port = chrome.runtime.connectNative('com.crx.host.that.is.not.installed')
+      let fired = false
+      port.onDisconnect.addListener(() => {
+        fired = true
+      })
+      port.disconnect()
+      setTimeout(() => reply({ fired }), 1000)
+      break
+    }
+
+    // Both shapes of runtime.requestUpdateCheck, and whether either left a lastError behind.
+    case 'request-update-check': {
+      chrome.runtime.requestUpdateCheck((status, details) => {
+        const callback = {
+          status,
+          details,
+          lastError: chrome.runtime.lastError ? chrome.runtime.lastError.message : null,
+        }
+        let promise
+        try {
+          promise = chrome.runtime.requestUpdateCheck()
+        } catch (error) {
+          reply({ callback, promise: 'threw ' + error.message })
+          return
+        }
+        Promise.resolve(promise).then(
+          (value) => reply({ callback, promise: value }),
+          (error) => reply({ callback, promise: 'rejected ' + error.message }),
+        )
+      })
+      break
+    }
+
     // Exercises the WebSocket proxy from a real MV3 service worker: open a
     // socket, receive an unsolicited text frame, request + receive a binary
     // frame, then close. Replies with an ordered log of what happened.

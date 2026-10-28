@@ -75,7 +75,7 @@ export const injectExtensionAPIs = () => {
     extensionId: string,
     application: string,
     receive: (message: any) => void,
-    disconnect: () => void,
+    disconnect: (reason?: string) => void,
     callback: ConnectNativeCallback,
   ) => {
     const connectionId = (contextBridge as any).executeInMainWorld({
@@ -86,9 +86,10 @@ export const injectExtensionAPIs = () => {
       receive(message)
     }
     ipcRenderer.on(`crx-native-msg-${connectionId}`, onMessage)
-    ipcRenderer.once(`crx-native-msg-${connectionId}-disconnect`, () => {
+    // A reason, when the main process sends one, becomes the port's lastError (see NativePort).
+    ipcRenderer.once(`crx-native-msg-${connectionId}-disconnect`, (_event, reason?: unknown) => {
       ipcRenderer.off(`crx-native-msg-${connectionId}`, onMessage)
-      disconnect()
+      disconnect(typeof reason === 'string' ? reason : undefined)
     })
     const send = (message: any) => {
       ipcRenderer.send(`crx-native-msg-${connectionId}`, message)
@@ -332,9 +333,37 @@ export const injectExtensionAPIs = () => {
       }
     }
 
+    /*
+      What `chrome.runtime.lastError` reads while a listener this file dispatches itself is running.
+
+      Chromium sets lastError on its own runtime object, for its own callbacks only. A port this
+      preload implements in JavaScript (NativePort) never goes through that path, so a native port
+      that died reported no error at all — where Chrome reports one on every disconnect the
+      extension did not ask for. The runtime namespace's `lastError` getter reads this first and
+      Chromium's value otherwise.
+    */
+    let injectedLastError: { message: string } | undefined
+    const withLastError = (message: string, dispatch: () => void) => {
+      const previous = injectedLastError
+      injectedLastError = { message }
+      try {
+        dispatch()
+      } finally {
+        injectedLastError = previous
+      }
+    }
+    // A `lastError` that reads through on every access, non-enumerable like Chrome's.
+    const defineLastError = <T extends object>(target: T, read: () => unknown): T =>
+      Object.defineProperty(target, 'lastError', {
+        get: read,
+        enumerable: false,
+        configurable: true,
+      })
+
     class NativePort implements chrome.runtime.Port {
       private connectionId: string = ''
       private connected = false
+      private received = false
       private pending: any[] = []
 
       name: string = ''
@@ -355,21 +384,37 @@ export const injectExtensionAPIs = () => {
       }
 
       _receive(message: any) {
+        this.received = true
         ;(this.onMessage as any)._emit(message)
       }
 
-      _disconnect() {
-        this.disconnect()
+      /*
+        The host side went away. Chrome — measured in Edge 156 against a host that is not installed —
+        calls onDisconnect with the port and lastError "Specified native messaging host not found.",
+        and "Native host has exited." once a host that ran is gone. This used to call the listeners
+        with no arguments and no lastError, so an extension could not tell a missing desktop app from
+        a clean close. The main process does not say why yet (`reason` is there for when it does), so
+        a port that never heard from its host is reported as the host not being found: the case of
+        every user without the vendor's desktop app, on every start.
+      */
+      _disconnect(reason?: string) {
+        if (!this.connected) return
+        this.connected = false
+        electron.disconnectNative(extensionId, this.connectionId)
+        const message =
+          reason ||
+          (this.received ? 'Native host has exited.' : 'Specified native messaging host not found.')
+        withLastError(message, () => (this.onDisconnect as any)._emit(this))
       }
 
       postMessage(message: any) {
         this._send(message)
       }
+      // Chrome does not fire onDisconnect on the port that called disconnect() (measured in Edge 156).
       disconnect() {
         if (this.connected) {
-          electron.disconnectNative(extensionId, this.connectionId)
-          ;(this.onDisconnect as any)._emit()
           this.connected = false
+          electron.disconnectNative(extensionId, this.connectionId)
         }
       }
       onMessage: chrome.runtime.PortMessageEvent = new Event() as any
@@ -775,19 +820,23 @@ export const injectExtensionAPIs = () => {
 
       extension: {
         factory: (base) => {
-          return {
-            ...base,
-            isAllowedFileSchemeAccess: invokeExtension('extension.isAllowedFileSchemeAccess', {
-              noop: true,
-              defaultResponse: false,
-            }),
-            isAllowedIncognitoAccess: invokeExtension('extension.isAllowedIncognitoAccess', {
-              noop: true,
-              defaultResponse: false,
-            }),
-            // TODO: Add native implementation
-            getViews: () => [],
-          }
+          // The MV2 alias of runtime.lastError; read through for the same reason (see runtime below).
+          return defineLastError(
+            {
+              ...base,
+              isAllowedFileSchemeAccess: invokeExtension('extension.isAllowedFileSchemeAccess', {
+                noop: true,
+                defaultResponse: false,
+              }),
+              isAllowedIncognitoAccess: invokeExtension('extension.isAllowedIncognitoAccess', {
+                noop: true,
+                defaultResponse: false,
+              }),
+              // TODO: Add native implementation
+              getViews: () => [],
+            },
+            () => base?.lastError,
+          )
         },
       },
 
@@ -1026,29 +1075,120 @@ export const injectExtensionAPIs = () => {
             })
           }
 
-          return {
-            ...base,
-            // onMessage signature is (message, sender, sendResponse) — patch arg[1].
-            onMessage: wrapSenderEvent(base.onMessage as any, (args) => {
-              patchSenderTab(args[1])
-            }),
-            // onConnect signature is (port) — the sender lives on the port.
-            onConnect: wrapSenderEvent(base.onConnect as any, (args) => {
-              patchSenderTab(args[0]?.sender)
-            }),
-            connectNative: (application: string) => {
-              const port = new NativePort()
-              const receive = port._receive.bind(port)
-              const disconnect = port._disconnect.bind(port)
-              const callback: ConnectNativeCallback = (connectionId, send) => {
-                port._init(connectionId, send)
-              }
-              electron.connectNative(extensionId, application, receive, disconnect, callback)
-              return port
-            },
-            openOptionsPage: invokeExtension('runtime.openOptionsPage'),
-            sendNativeMessage: invokeExtension('runtime.sendNativeMessage'),
+          /*
+            `runtime.onInstalled`, fired from the library's record because Electron never fires it
+            (see RuntimeAPI in the browser side). Only a background — the MV3 worker, or an MV2
+            background page — receives it, as in Chrome, where it is dispatched to the background.
+
+            The first `addListener` asks the main process for the pending details, once; every listener
+            registered before the answer arrives gets them, which covers the ones an extension adds
+            while its worker script evaluates. Anything subscribed later misses it, as in Chrome.
+          */
+          const isBackgroundContext = (() => {
+            if (typeof (globalThis as any).ServiceWorkerGlobalScope !== 'undefined') {
+              return globalThis instanceof (globalThis as any).ServiceWorkerGlobalScope
+            }
+            const background = (manifest as any).background
+            if (manifest.manifest_version !== 2 || !background) return false
+            const page = background.page || '_generated_background_page.html'
+            try {
+              return location.href.split('#')[0] === (base as any).getURL(page)
+            } catch {
+              return false
+            }
+          })()
+
+          const createOnInstalled = () => {
+            const listeners = new Set<Function>()
+            let asked = false
+            const ask = () => {
+              if (asked) return
+              asked = true
+              invokeExtension('runtime.takeInstalledDetails')().then((details: any) => {
+                if (!details) return
+                for (const listener of Array.from(listeners)) {
+                  try {
+                    listener(details)
+                  } catch (error) {
+                    // An extension's own listener throwing must not stop the next one, as in Chrome.
+                    console.error(error)
+                  }
+                }
+              })
+            }
+            return {
+              addListener: (callback: Function) => {
+                listeners.add(callback)
+                ask()
+              },
+              removeListener: (callback: Function) => {
+                listeners.delete(callback)
+              },
+              hasListener: (callback: Function) => listeners.has(callback),
+              hasListeners: () => listeners.size > 0,
+            }
           }
+
+          /*
+            `lastError` reads through to Chromium on every access. The spread below cannot carry it: Chromium
+            defines `lastError` on ITS runtime object only while one of its callbacks runs, and
+            deletes it after (Edge 156: no own property outside a callback). So on this replacement
+            object `chrome.runtime.lastError` was always undefined — every callback-style call
+            looked like a success to the extension — and, because the extension's read never
+            reached Chromium's getter, Chromium also logged "Unchecked runtime.lastError" for
+            callers that DID check. That is where RoboForm's 11 to 18 "Could not establish
+            connection. Receiving end does not exist." per boot came from: its broadcasts to
+            popups that are not open, which read lastError on purpose.
+          */
+          return defineLastError(
+            {
+              ...base,
+              ...(isBackgroundContext ? { onInstalled: createOnInstalled() } : {}),
+              // onMessage signature is (message, sender, sendResponse) — patch arg[1].
+              onMessage: wrapSenderEvent(base.onMessage as any, (args) => {
+                patchSenderTab(args[1])
+              }),
+              // onConnect signature is (port) — the sender lives on the port.
+              onConnect: wrapSenderEvent(base.onConnect as any, (args) => {
+                patchSenderTab(args[0]?.sender)
+              }),
+              connectNative: (application: string) => {
+                const port = new NativePort()
+                const receive = port._receive.bind(port)
+                const disconnect = port._disconnect.bind(port)
+                const callback: ConnectNativeCallback = (connectionId, send) => {
+                  port._init(connectionId, send)
+                }
+                electron.connectNative(extensionId, application, receive, disconnect, callback)
+                return port
+              },
+              openOptionsPage: invokeExtension('runtime.openOptionsPage'),
+              sendNativeMessage: invokeExtension('runtime.sendNativeMessage'),
+              /*
+              Electron's own requestUpdateCheck sets lastError "Autoupdate is not enabled." and hands
+              the callback nothing — and without a callback the promise REJECTS. Chrome never fails
+              here: it answers a status (measured in Edge 156: callback ('throttled', { version: '' }),
+              promise { status: 'throttled', version: '' }). Grammarly 14.1342.0 calls it on every
+              worker start, without reading lastError, so each boot logged an unchecked lastError; a
+              caller that awaits it would get an unhandled rejection instead.
+
+              There is no updater in an Electron embedder — the host ships extension updates itself —
+              so the true answer is that there is no update, in the shape Chrome gives.
+            */
+              requestUpdateCheck: (
+                callback?: (status: string, details: { version: string }) => void,
+              ) => {
+                const status = 'no_update'
+                const details = { version: '' }
+                if (typeof callback === 'function') {
+                  queueMicrotask(() => callback(status, details))
+                  return
+                }
+                return Promise.resolve({ status, ...details })
+              },
+            },
+            () => injectedLastError ?? base?.lastError,
+          )
         },
       },
 
