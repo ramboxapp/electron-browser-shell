@@ -57,6 +57,7 @@
     "webRequest",
     "webNavigation"
   ],
+  "optional_permissions": ["clipboardRead", "clipboardWrite"],
   "host_permissions": ["<all_urls>"],
   "commands": {
     "autofill_login": {

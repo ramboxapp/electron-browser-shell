@@ -36,9 +36,10 @@ export class PermissionsAPI {
 
   private processExtension(extension: Electron.Extension) {
     const manifest: chrome.runtime.Manifest = extension.manifest
+    // Copies: grants and revocations edit these lists, and must not edit the manifest object.
     this.permissionMap.set(extension.id, {
-      permissions: (manifest.permissions || []) as chrome.runtime.ManifestPermissions[],
-      origins: manifest.host_permissions || [],
+      permissions: [...(manifest.permissions || [])] as chrome.runtime.ManifestPermissions[],
+      origins: [...(manifest.host_permissions || [])],
     })
   }
 
@@ -64,8 +65,34 @@ export class PermissionsAPI {
     return this.permissionMap.get(extension.id)
   }
 
-  private remove = ({ extension }: ExtensionEvent, permissions: chrome.permissions.Permissions) => {
-    // TODO
+  /**
+   * Only what the extension was granted at runtime can be revoked: Chrome rejects removing anything
+   * the manifest requires ("You cannot remove required permissions."). What was removed is announced
+   * through permissions.onRemoved, which is how an extension's worker learns about it.
+   */
+  private remove = ({ extension }: ExtensionEvent, request: chrome.permissions.Permissions) => {
+    const manifest: chrome.runtime.Manifest = extension.manifest
+    const required = new Set<string>(manifest.permissions || [])
+    const requiredOrigins = new Set<string>(manifest.host_permissions || [])
+    if (
+      (request.permissions || []).some((p) => required.has(p)) ||
+      (request.origins || []).some((o) => requiredOrigins.has(o))
+    ) {
+      throw new Error('You cannot remove required permissions.')
+    }
+
+    const current = this.permissionMap.get(extension.id)
+    if (!current) return false
+    const removed = {
+      permissions: (request.permissions || []).filter((p) => current.permissions.includes(p)),
+      origins: (request.origins || []).filter((o) => current.origins.includes(o)),
+    }
+    current.permissions = current.permissions.filter((p) => !removed.permissions.includes(p))
+    current.origins = current.origins.filter((o) => !removed.origins.includes(o))
+
+    if (removed.permissions.length || removed.origins.length) {
+      this.ctx.router.sendEvent(extension.id, 'permissions.onRemoved', removed)
+    }
     return true
   }
 
@@ -86,10 +113,14 @@ export class PermissionsAPI {
     if (!granted) return false
 
     const permissions = this.permissionMap.get(extension.id)!
+    // Only what is new is announced, the way Chrome does: re-requesting something already granted
+    // grants nothing and fires nothing.
+    const added = { permissions: [] as string[], origins: [] as string[] }
     if (request.origins) {
       for (const origin of request.origins) {
         if (!permissions.origins.includes(origin)) {
           permissions.origins.push(origin)
+          added.origins.push(origin)
         }
       }
     }
@@ -97,8 +128,14 @@ export class PermissionsAPI {
       for (const permission of request.permissions) {
         if (!permissions.permissions.includes(permission)) {
           permissions.permissions.push(permission)
+          added.permissions.push(permission)
         }
       }
+    }
+    if (added.permissions.length || added.origins.length) {
+      // An extension's worker keeps its idea of what it may do and refreshes it from this event
+      // (Proton Pass does, for the clipboard permissions it asks for from its settings).
+      this.ctx.router.sendEvent(extension.id, 'permissions.onAdded', added)
     }
     return true
   }
