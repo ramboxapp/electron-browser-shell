@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<!--
+  A popup sized the way Proton Pass sizes its own: CSS variables for the size, and a script that, once
+  started, adopts the viewport it finds as its size and keeps doing so on every resize (Proton does it
+  so that a browser that clamps the popup gets a popup that fits). It is only correct if the popup's
+  viewport already equals the content size when that script looks, which is what Chrome guarantees.
+  The spec points the image at a URL it answers late, so the script looks long after the first layout.
+-->
+<html>
+  <head>
+    <style>
+      :root {
+        --popup-width: 300px;
+        --popup-height: 200px;
+      }
+      html,
+      body {
+        margin: 0;
+        width: var(--popup-width) !important;
+        height: var(--popup-height) !important;
+      }
+    </style>
+  </head>
+  <body>
+    <p style="margin: 0">Popup with its own size</p>
+    <img alt="" src="__SLOW_URL__" />
+    <script src="adopt-viewport.js"></script>
+  </body>
+</html>

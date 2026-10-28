@@ -280,6 +280,84 @@ describe('chrome.browserAction', () => {
     })
   })
 
+  /*
+    What <browser-action> draws for a badge. Proton Pass sets a white background for every tab
+    (setBadgeBackgroundColor({ color: '#FFFFFF' })) and the site's login count per tab
+    (setBadgeText({ tabId, text: '1' })). Measured in Rambox on 28/10/2026: the badge held "1", drawn
+    in a fixed white on that white — an empty white box on the icon. Chrome picks the text color for
+    contrast when the extension sets none (IconWithBadgeImageSource, GetColorWithMaxContrast).
+  */
+  describe('<browser-action> badge', () => {
+    const browser = useExtensionBrowser({
+      url: server.getUrl,
+      extensionName: 'rpc',
+    })
+
+    const readBadge = async () => {
+      await browser.webContents.executeJavaScript(
+        `(${() => {
+          if (!document.querySelector('browser-action-list')) {
+            document.body.appendChild(document.createElement('browser-action-list'))
+          }
+        }})();`,
+      )
+      // The list fetches its state and draws on an animation frame.
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      return browser.webContents.executeJavaScript(
+        `(${(id: string) => {
+          const list = document.querySelector('browser-action-list')!
+          const badge = list.shadowRoot!.querySelector(`[id="${id}"] .badge`) as HTMLElement | null
+          if (!badge) return null
+          const style = getComputedStyle(badge)
+          return { text: badge.textContent, color: style.color, background: style.backgroundColor }
+        }})('${browser.extension.id}');`,
+      )
+    }
+
+    it('draws the text dark on a light background nobody set a text color for', async () => {
+      const tabId = browser.webContents.id
+      await browser.crx.exec('browserAction.setBadgeBackgroundColor', { color: '#FFFFFF' })
+      await browser.crx.exec('browserAction.setBadgeText', { tabId, text: '1' })
+      const badge = await readBadge()
+      expect(badge, 'the badge must be drawn').to.not.be.null
+      expect(badge.text).to.equal('1')
+      expect(badge.background).to.equal('rgb(255, 255, 255)')
+      // Google Grey 900, what Chrome uses for "dark" (color_utils g_darkest_color).
+      expect(badge.color, 'white text on a white badge is invisible').to.equal('rgb(32, 33, 36)')
+    })
+
+    it('draws the text white on a dark background', async () => {
+      await browser.crx.exec('browserAction.setBadgeBackgroundColor', { color: [0, 0, 128, 255] })
+      await browser.crx.exec('browserAction.setBadgeText', { text: '7' })
+      const badge = await readBadge()
+      expect(badge.background).to.equal('rgb(0, 0, 128)')
+      expect(badge.color).to.equal('rgb(255, 255, 255)')
+    })
+
+    it('uses the text color the extension set', async () => {
+      await browser.crx.exec('browserAction.setBadgeBackgroundColor', { color: '#FFFFFF' })
+      await browser.crx.exec('browserAction.setBadgeTextColor', { color: '#FF0000' })
+      await browser.crx.exec('browserAction.setBadgeText', { text: '3' })
+      expect(await browser.crx.exec('browserAction.getBadgeTextColor')).to.equal('#FF0000')
+      const badge = await readBadge()
+      expect(badge.color).to.equal('rgb(255, 0, 0)')
+    })
+
+    it("prefers the active tab's text over the one set for every tab", async () => {
+      const tabId = browser.webContents.id
+      await browser.crx.exec('browserAction.setBadgeText', { text: 'all' })
+      await browser.crx.exec('browserAction.setBadgeText', { tabId, text: 'tab' })
+      expect((await readBadge()).text).to.equal('tab')
+    })
+
+    it("hides the badge when the active tab's text is empty", async () => {
+      const tabId = browser.webContents.id
+      await browser.crx.exec('browserAction.setBadgeText', { text: 'all' })
+      await browser.crx.exec('browserAction.setBadgeText', { tabId, text: '' })
+      expect(await readBadge()).to.be.null
+    })
+  })
+
   describe('crx:// protocol', () => {
     const browser = useExtensionBrowser({
       url: server.getUrl,

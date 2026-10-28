@@ -83,6 +83,52 @@ export const injectBrowserAction = () => {
     const browserAction: typeof __browserAction__ =
       (globalThis as any).browserAction || __browserAction__
 
+    /** A badge color as CSS: setBadge*Color takes a CSS string or an [r, g, b, a] array (0-255). */
+    const cssColor = (color: any): string | undefined => {
+      if (Array.isArray(color) && color.length >= 3) {
+        const [r, g, b, a = 255] = color
+        return `rgba(${r}, ${g}, ${b}, ${a / 255})`
+      }
+      return typeof color === 'string' && color ? color : undefined
+    }
+
+    /*
+      The text color Chrome draws a badge in when the extension never set one: whichever of white and
+      Google Grey 900 contrasts more with the background (IconWithBadgeImageSource →
+      color_utils::GetColorWithMaxContrast: dark below a relative luminance of 0.211692036). This was
+      a fixed white, so a white badge — Proton Pass sets #FFFFFF and puts the site's login count in
+      it — drew white on white: an empty white box on the icon. Unset or transparent background:
+      Chrome's default badge background is dark, so white.
+    */
+    let colorContext: CanvasRenderingContext2D | null | undefined
+    const badgeTextColor = (background?: string): string => {
+      const WHITE = '#fff'
+      const DARKEST = '#202124'
+      if (!background) return WHITE
+      colorContext = colorContext || document.createElement('canvas').getContext('2d')
+      if (!colorContext) return WHITE
+      // fillStyle normalizes any CSS color to '#rrggbb', or 'rgba(r, g, b, a)' when translucent.
+      colorContext.fillStyle = '#000'
+      colorContext.fillStyle = background
+      const normalized = String(colorContext.fillStyle)
+      let rgb: number[]
+      let alpha = 1
+      if (normalized.startsWith('#')) {
+        rgb = [1, 3, 5].map((i) => parseInt(normalized.slice(i, i + 2), 16))
+      } else {
+        const parts = normalized.match(/[\d.]+/g)?.map(Number) || []
+        rgb = parts.slice(0, 3)
+        alpha = parts[3] ?? 1
+      }
+      if (rgb.length < 3 || alpha === 0) return WHITE
+      const linear = (c: number) => {
+        const v = c / 255
+        return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4)
+      }
+      const luminance = 0.2126 * linear(rgb[0]) + 0.7152 * linear(rgb[1]) + 0.0722 * linear(rgb[2])
+      return luminance < 0.211692036 ? WHITE : DARKEST
+    }
+
     class BrowserActionElement extends HTMLButtonElement {
       private updateId?: number
       private badge?: HTMLDivElement
@@ -248,8 +294,14 @@ export const injectBrowserAction = () => {
         const action = browserAction.getAction(this.id)
 
         const activeTabId = this.tab
-        const tabInfo = activeTabId > -1 ? action.tabs[activeTabId] : {}
-        const info = { ...tabInfo, ...action }
+        const tabInfo = (activeTabId > -1 && action.tabs?.[activeTabId]) || {}
+        // A value set for the tab wins over the one set for every tab, as in Chrome
+        // (ExtensionAction::GetValue). It used to be the other way around. A key the tab holds as
+        // undefined is one that was reset, so it falls back.
+        const info = { ...action }
+        for (const key of Object.keys(tabInfo)) {
+          if (tabInfo[key] !== undefined) info[key] = tabInfo[key]
+        }
 
         this.title = typeof info.title === 'string' ? info.title : ''
 
@@ -257,9 +309,10 @@ export const injectBrowserAction = () => {
 
         if (info.text) {
           const badge = this.getBadge()
+          const background = cssColor(info.color)
           badge.textContent = info.text
-          badge.style.color = '#fff' // TODO: determine bg lightness?
-          badge.style.backgroundColor = info.color
+          badge.style.color = cssColor(info.textColor) || badgeTextColor(background)
+          badge.style.backgroundColor = background || ''
         } else if (this.badge) {
           this.badge.remove()
           this.badge = undefined

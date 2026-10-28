@@ -50,6 +50,9 @@ export class PopupView extends EventEmitter {
   /** Preferred size changes are only received in Electron v12+ */
   private usingPreferredSize = supportsPreferredSize()
 
+  /** Whether Chromium has reported a preferred size yet. It only starts after the load stops. */
+  private receivedPreferredSize = false
+
   private readyPromise: Promise<void>
 
   constructor(opts: PopupViewOptions) {
@@ -99,6 +102,20 @@ export class PopupView extends EventEmitter {
     this.browserWindow.on('closed', this.destroy)
     this.parent.once('closed', this.destroy)
 
+    /*
+      Start small *before* the page loads, not after. Electron only turns preferred-size mode on when
+      the load stops, so for the whole load the page sees whatever size the window has — and the old
+      reset to the minimum right after did-finish-load landed exactly when extensions run their
+      start-up code. A popup that sizes itself from its own viewport (Proton Pass reads
+      documentElement.clientWidth and adopts it as its width, on start-up and on every resize) caught
+      the 25x25 window there and made it its size: the preferred size then *was* 25x25 (32x39 after
+      Windows clamps it) and nothing grew it back. 3 of 10 opens in Rambox, 28/10/2026.
+      The page's own size reaches us earlier, from the preload (see setContentSizeHint).
+    */
+    if (this.usingPreferredSize) {
+      this.setSize({ width: PopupView.BOUNDS.minWidth, height: PopupView.BOUNDS.minHeight })
+    }
+
     this.readyPromise = this.load(opts.url)
   }
 
@@ -124,8 +141,16 @@ export class PopupView extends EventEmitter {
     if (this.destroyed) return
 
     if (this.usingPreferredSize) {
-      // Set small initial size so the preferred size grows to what's needed
-      this.setSize({ width: PopupView.BOUNDS.minWidth, height: PopupView.BOUNDS.minHeight })
+      // No resize here: the window already has the hint's size, or the minimum it started at, and
+      // preferred-size mode (on from now) grows it from there. Shrinking it now is what Proton caught.
+      // Chromium reports a first preferred size after the load; if it ever doesn't, show the popup
+      // anyway rather than leave an invisible window that eats the next click.
+      setTimeout(() => {
+        if (this.destroyed || !this.hidden) return
+        d('no preferred size after load, showing anyway')
+        this.updatePosition()
+        this.show()
+      }, 250)
     } else {
       // Set large initial size to avoid overflow
       this.setSize({ width: PopupView.BOUNDS.maxWidth, height: PopupView.BOUNDS.maxHeight })
@@ -283,9 +308,27 @@ export class PopupView extends EventEmitter {
     this.updatePosition()
   }
 
+  /**
+   * The page's own size, measured by the preload when the document becomes interactive — before the
+   * page's deferred scripts run, so before an extension can read its viewport. Chrome's popup never
+   * shows a page a viewport other than its content size (auto-resize sizes the frame inside the
+   * layout itself); Electron's preferred-size mode only starts after the load, so this is how the
+   * window gets there first. For a popup that declares its size (`html, body { width: 600px }`)
+   * the measure is exact; for a fluid one it is a first guess the preferred size then corrects.
+   * Ignored once Chromium has reported a preferred size, which is the authority.
+   */
+  setContentSizeHint(size: Electron.Size) {
+    if (this.destroyed || !this.usingPreferredSize || this.receivedPreferredSize) return
+    if (!(size?.width > 0 && size?.height > 0)) return
+    d('setContentSizeHint', size)
+    this.setSize(size)
+    this.updatePosition()
+  }
+
   private updatePreferredSize = (event: Electron.Event, size: Electron.Size) => {
     d('updatePreferredSize', size)
     this.usingPreferredSize = true
+    this.receivedPreferredSize = true
     this.setSize(size)
     this.updatePosition()
 

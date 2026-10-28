@@ -667,6 +667,9 @@ export const injectExtensionAPIs = () => {
         setBadgeBackgroundColor: invokeExtension('browserAction.setBadgeBackgroundColor'),
         getBadgeBackgroundColor: invokeExtension('browserAction.getBadgeBackgroundColor'),
 
+        setBadgeTextColor: invokeExtension('browserAction.setBadgeTextColor'),
+        getBadgeTextColor: invokeExtension('browserAction.getBadgeTextColor'),
+
         getUserSettings: invokeExtension('browserAction.getUserSettings'),
 
         enable: invokeExtension('browserAction.enable', { noop: true }),
@@ -1607,6 +1610,39 @@ export const injectExtensionAPIs = () => {
     Object.freeze(chrome)
 
     void 0 // no return
+  }
+
+  /*
+    Tell the main process this page's own size as soon as the document is interactive: before its
+    deferred scripts run, so before an extension can read its viewport. Electron's preferred-size
+    mode only starts after the load, and a popup that sizes itself from its viewport (Proton Pass)
+    otherwise adopts whatever the window happened to measure then. Main ignores it for every page
+    but the open browser-action popup. Isolated world, so the page cannot see or fake it.
+  */
+  if (
+    process.type === 'renderer' &&
+    location.protocol === 'chrome-extension:' &&
+    window.top === window
+  ) {
+    const reportContentSize = () => {
+      const root = document.documentElement
+      if (!root) return
+      const size = { width: root.scrollWidth, height: root.scrollHeight }
+      ipcRenderer
+        .invoke('crx-msg', location.hostname, 'browserAction.popupContentSize', size)
+        .catch(() => {})
+    }
+    if (document.readyState === 'loading') {
+      document.addEventListener(
+        'readystatechange',
+        () => {
+          if (document.readyState === 'interactive') reportContentSize()
+        },
+        { once: true },
+      )
+    } else {
+      reportContentSize()
+    }
   }
 
   if (!process.contextIsolated) {

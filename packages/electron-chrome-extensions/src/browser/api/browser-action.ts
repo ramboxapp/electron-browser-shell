@@ -21,6 +21,7 @@ if (!app.isReady()) {
 interface ExtensionAction {
   color?: string
   text?: string
+  textColor?: string
   title?: string
   icon?: chrome.browserAction.TabIconDetails
   popup?: string
@@ -155,6 +156,13 @@ export class BrowserActionAPI {
 
     handleProp('BadgeBackgroundColor', 'color')
     handleProp('BadgeText', 'text')
+    // chrome.action.setBadgeTextColor (Chrome 110). Unset, Chrome picks the text color for contrast
+    // with the background; <browser-action> does the same (see badgeTextColor in browser-action.ts).
+    // Its details carry the value as `color`, like setBadgeBackgroundColor, so it is stored apart.
+    handle('browserAction.getBadgeTextColor', getter('textColor'))
+    handle('browserAction.setBadgeTextColor', (event: ExtensionEvent, details: any = {}) =>
+      setDetails(event, { tabId: details.tabId, textColor: details.color }, 'textColor'),
+    )
     handleProp('Title', 'title')
     handleProp('Popup', 'popup')
 
@@ -176,6 +184,15 @@ export class BrowserActionAPI {
     )
 
     handle('browserAction.openPopup', this.openPopup)
+
+    // Not a chrome.* API: the preload reports an extension page's own size as soon as the document
+    // is interactive, and only the open popup's page is listened to. See PopupView.setContentSizeHint.
+    handle('browserAction.popupContentSize', ({ type, sender }, size: Electron.Size) => {
+      const popup = this.popup
+      if (type !== 'frame' || !popup || popup.isDestroyed()) return
+      if (popup.browserWindow?.webContents !== sender) return
+      popup.setContentSizeHint(size)
+    })
 
     // browserAction preload API
     const preloadOpts = { allowRemote: true, extensionContext: false }
