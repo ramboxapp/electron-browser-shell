@@ -78,11 +78,23 @@ export class WindowsAPI {
     return details
   }
 
-  private getWindowDetails(win: Electron.BaseWindow) {
-    if (this.ctx.store.windowDetailsCache.has(win.id)) {
-      return this.ctx.store.windowDetailsCache.get(win.id)
-    }
-    const details = this.createWindowDetails(win)
+  /**
+   * A window's details, read now — never from a cache.
+   *
+   * These used to come from `windowDetailsCache`, filled the first time anything asked and refreshed
+   * only on 'resized'. Everything in a window's details is live state — `focused`, `state`, the tabs
+   * it holds — so the cache froze the answer at the moment the window was first seen. In Rambox that
+   * moment is the first addTab() at boot, before any other app is registered and usually before the
+   * window has focus, so every extension was told for the whole session that the window had no tabs
+   * and was not focused. Grammarly 14.1342.0 does `windows.getCurrent().then(w => w.focused ?
+   * getActiveTab() : none)`, so a frozen `focused: false` makes it decide there is no active tab.
+   *
+   * `tabs` is only included when the caller asks with `populate: true`, which is what Chrome does
+   * (measured in Edge 156: `getAll()` has no `tabs` key, `getAll({ populate: true })` lists them).
+   */
+  private getWindowDetails(win: Electron.BaseWindow, queryOptions?: chrome.windows.QueryOptions) {
+    const details = { ...this.createWindowDetails(win) }
+    if (!queryOptions?.populate) delete details.tabs
     return details
   }
 
@@ -94,10 +106,10 @@ export class WindowsAPI {
     }
   }
 
-  private get(event: ExtensionEvent, windowId: number) {
+  private get(event: ExtensionEvent, windowId: number, queryOptions?: chrome.windows.QueryOptions) {
     const win = this.getWindowFromId(windowId)
     if (!win) return { id: WindowsAPI.WINDOW_ID_NONE }
-    return this.getWindowDetails(win)
+    return this.getWindowDetails(win, queryOptions)
   }
 
   /**
@@ -113,7 +125,7 @@ export class WindowsAPI {
    * truthful. With no window at all, Chrome would reject — which is not reachable from here, for
    * the reason the comment below the fallback gives.
    */
-  private getLastFocused(event: ExtensionEvent) {
+  private getLastFocused(event: ExtensionEvent, queryOptions?: chrome.windows.QueryOptions) {
     const win =
       this.ctx.store.getLastFocusedWindow() ?? this.ctx.store.windows.values().next().value
     // Same shape `get()` answers with above when it cannot find the window, and for the same reason:
@@ -121,11 +133,11 @@ export class WindowsAPI {
     // which crashes the extension exactly like the `null` this replaced. A window-shaped object with
     // no id lets `w.focused` read false and the extension carry on.
     if (!win) return { id: WindowsAPI.WINDOW_ID_NONE, focused: false }
-    return this.getWindowDetails(win)
+    return this.getWindowDetails(win, queryOptions)
   }
 
-  private getAll(event: ExtensionEvent) {
-    return Array.from(this.ctx.store.windows).map(this.getWindowDetails.bind(this))
+  private getAll(event: ExtensionEvent, queryOptions?: chrome.windows.QueryOptions) {
+    return Array.from(this.ctx.store.windows).map((win) => this.getWindowDetails(win, queryOptions))
   }
 
   private async create(event: ExtensionEvent, details: chrome.windows.CreateData) {
@@ -134,7 +146,7 @@ export class WindowsAPI {
     // worker went idle — wake it before the consumer's createWindow() runs.
     await wakeExtensionServiceWorker(this.ctx.session, event.extension.id)
     const win = await this.ctx.store.createWindow(event, details)
-    return this.getWindowDetails(win)
+    return this.getWindowDetails(win, { populate: true })
   }
 
   private async update(
