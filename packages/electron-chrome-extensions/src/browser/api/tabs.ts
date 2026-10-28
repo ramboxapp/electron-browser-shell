@@ -50,7 +50,10 @@ export class TabsAPI {
   private observeTab(tab: TabContents) {
     const tabId = tab.id
 
-    // Tab-level events that already only fire for the top-level document.
+    // Tab-level events. did-start-loading and did-stop-loading are NOT top-level only: they fire
+    // when any frame starts or stops loading. That is harmless here only because the status they
+    // feed is read from the main frame (see createTabDetails), so an iframe changes nothing and
+    // onUpdated, which only reports differences, stays quiet.
     const updateEvents = [
       'page-title-updated', // title
       'did-start-loading', // status
@@ -146,7 +149,18 @@ export class TabsAPI {
       mutedInfo: { muted: tab.audioMuted },
       pinned: false,
       selected: true,
-      status: tab.isLoading() ? 'loading' : 'complete',
+      /*
+        The tab's status is its own document's, not its iframes'. `isLoading()` is true while ANY
+        frame loads, so a page that merely adds an iframe went 'loading' → 'complete' and every
+        extension got two tabs.onUpdated for a navigation that never happened. Chromium sends none
+        (measured in Edge 156: inserting an iframe, web or extension, fires no tabs.onUpdated).
+
+        That is what kept Keeper's in-field prompt from opening: the prompt IS an iframe, and
+        Keeper's onUpdated handler closes any open prompt on `status: 'complete'`, reading it as the
+        page having navigated. `isLoadingMainFrame()` is Electron's name for Chromium's
+        ShouldShowLoadingUI(), which is the main-frame loading state Chrome reports here.
+      */
+      status: tab.isLoadingMainFrame() ? 'loading' : 'complete',
       title: tab.getTitle(),
       url: tab.getURL(), // TODO: tab.mainFrame.url (Electron 12)
       width,

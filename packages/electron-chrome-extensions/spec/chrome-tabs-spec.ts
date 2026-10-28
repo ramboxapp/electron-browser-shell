@@ -304,5 +304,74 @@ describe('chrome.tabs', () => {
       expect(changeInfo).to.haveOwnProperty('discarded')
       expect(changeInfo.discarded).to.equal(true)
     })
+
+    /*
+      Every tabs.onUpdated the library broadcasts for this tab, read in the main process where it is
+      dispatched. Counting absences needs this: an extension-side listener can only prove that an
+      event came, never that none did.
+    */
+    const recordBroadcasts = () => {
+      const router = (browser.extensions as any).ctx.router
+      const original = router.broadcastEvent
+      const seen: { tabId: number; changeInfo: { status?: string; [key: string]: unknown } }[] = []
+      router.broadcastEvent = function (eventName: string, ...args: any[]) {
+        if (eventName === 'tabs.onUpdated' && args[0] === browser.webContents.id) {
+          seen.push({ tabId: args[0], changeInfo: args[1] })
+        }
+        return original.call(this, eventName, ...args)
+      }
+      return { seen, restore: () => (router.broadcastEvent = original) }
+    }
+
+    /*
+      Chromium sends no tabs.onUpdated when a page adds an iframe — measured in Edge 156 with a web
+      iframe and with an extension's own one. Electron's did-start-loading/did-stop-loading fire for
+      it all the same, and `isLoading()` counts subframes, so the tab used to report 'loading' and
+      then 'complete' for a navigation that never happened. Keeper's in-field prompt is an iframe and
+      Keeper closes its prompt on `status: 'complete'`: the prompt opened and was shut by its own load.
+    */
+    it('stays quiet when the page only adds an iframe', async () => {
+      const tab = browser.webContents
+      const { seen, restore } = recordBroadcasts()
+      // The precondition that used to produce the events: the WebContents does go through a load.
+      const stopped = emittedOnce(tab, 'did-stop-loading')
+      try {
+        await tab.executeJavaScript(`new Promise((resolve) => {
+          const frame = document.createElement('iframe')
+          frame.onload = () => resolve(true)
+          frame.src = ${JSON.stringify(`${server.getUrl()}subframe`)}
+          document.body.appendChild(frame)
+        })`)
+        await stopped
+        await new Promise((resolve) => setTimeout(resolve, 200))
+      } finally {
+        restore()
+      }
+
+      expect(seen).to.deep.equal([])
+      const details = await browser.crx.exec('tabs.get', tab.id)
+      expect(details.status).to.equal('complete')
+    })
+
+    it('still reports loading and complete for the tab navigating', async () => {
+      const tab = browser.webContents
+      const { seen, restore } = recordBroadcasts()
+      // And the extension receives it, which is the half the broadcast spy cannot vouch for.
+      const delivered = browser.crx.eventOnce('tabs.onUpdated')
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      try {
+        await tab.loadURL(`${server.getUrl()}navigated`)
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      } finally {
+        restore()
+      }
+
+      const statuses = seen.map((e) => e.changeInfo.status).filter(Boolean)
+      expect(statuses[0]).to.equal('loading')
+      expect(statuses[statuses.length - 1]).to.equal('complete')
+      const [tabId, changeInfo] = await delivered
+      expect(tabId).to.equal(tab.id)
+      expect(changeInfo.status).to.equal('loading')
+    })
   })
 })
