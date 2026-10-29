@@ -28,6 +28,7 @@ import { readLoadedExtensionManifest } from './manifest'
 import { PermissionsAPI } from './api/permissions'
 import { WebSocketAPI } from './api/websocket'
 import { BrowsingDataAPI } from './api/browsing-data'
+import { SystemAPI } from './api/system'
 import { resolvePartition } from './partition'
 
 function checkVersion() {
@@ -154,6 +155,7 @@ export class ElectronChromeExtensions extends EventEmitter {
     offscreen: OffscreenAPI
     permissions: PermissionsAPI
     runtime: RuntimeAPI
+    system: SystemAPI
     tabs: TabsAPI
     webNavigation: WebNavigationAPI
     webSocket: WebSocketAPI
@@ -199,6 +201,7 @@ export class ElectronChromeExtensions extends EventEmitter {
       offscreen: new OffscreenAPI(this.ctx),
       permissions: new PermissionsAPI(this.ctx),
       runtime: new RuntimeAPI(this.ctx),
+      system: new SystemAPI(this.ctx),
       tabs: new TabsAPI(this.ctx),
       webNavigation: new WebNavigationAPI(this.ctx),
       webSocket: new WebSocketAPI(this.ctx),

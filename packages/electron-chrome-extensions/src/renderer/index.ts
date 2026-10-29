@@ -2040,6 +2040,68 @@ export const injectExtensionAPIs = () => {
           return api
         },
       },
+
+      system: {
+        shouldInject: () =>
+          declares('system.cpu', 'system.memory', 'system.storage', 'system.display'),
+        factory: (base) => {
+          const api: Record<string, unknown> = {}
+          // cpu and memory are Electron's own and answer like Chrome's; kept as they are.
+          for (const name of ['cpu', 'memory']) {
+            try {
+              if (declares(`system.${name}`) && base?.[name]) api[name] = base[name]
+            } catch {
+              // a lazy binding that fails to load leaves the member out, nothing more
+            }
+          }
+          /*
+            storage: Electron's native `getInfo()` takes the whole process down (0xC0000005, measured
+            on 43.0.0 and 44.9.3+wvcus with no library loaded), so it is answered from the main
+            process instead. Without this, one extension declaring `system.storage` could crash the
+            host app with a single call.
+          */
+          if (declares('system.storage')) {
+            api.storage = {
+              getInfo: invokeExtension('system.storage.getInfo'),
+              getAvailableCapacity: invokeExtension('system.storage.getAvailableCapacity'),
+              ejectDevice: invokeExtension('system.storage.ejectDevice'),
+              onAttached: inert(),
+              onDetached: inert(),
+              EjectDeviceResultCode: enumOf('success', 'in_use', 'no_such_device', 'failure'),
+              StorageUnitType: enumOf('fixed', 'removable', 'unknown'),
+            }
+          }
+          /*
+            display: Electron's native methods all fail with "System display API is not available."
+            The read half is answered from `screen`; the rest is what Chrome itself answers on
+            desktop, where those methods exist only for ChromeOS.
+          */
+          if (declares('system.display')) {
+            const chromeOSOnly = failWith('Function available only on ChromeOS.')
+            api.display = {
+              getInfo: invokeExtension('system.display.getInfo'),
+              getDisplayLayout: chromeOSOnly,
+              setDisplayProperties: chromeOSOnly,
+              setDisplayLayout: chromeOSOnly,
+              enableUnifiedDesktop: noop,
+              overscanCalibrationStart: noop,
+              overscanCalibrationAdjust: noop,
+              overscanCalibrationReset: noop,
+              overscanCalibrationComplete: noop,
+              showNativeTouchCalibration: chromeOSOnly,
+              startCustomTouchCalibration: noop,
+              completeCustomTouchCalibration: noop,
+              clearTouchCalibration: noop,
+              setMirrorMode: chromeOSOnly,
+              onDisplayChanged: new ExtensionEvent('system.display.onDisplayChanged'),
+              ActiveState: enumOf('active', 'inactive'),
+              LayoutPosition: enumOf('top', 'right', 'bottom', 'left'),
+              MirrorMode: enumOf('off', 'normal', 'mixed'),
+            }
+          }
+          return api
+        },
+      },
     }
 
     // Initialize APIs
