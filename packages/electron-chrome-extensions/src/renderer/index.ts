@@ -418,6 +418,16 @@ export const injectExtensionAPIs = () => {
       }
     }
 
+    // Shared by chrome.windows and chrome.tabs, as Chrome's are (values read from Edge 156).
+    const WINDOW_TYPE = {
+      NORMAL: 'normal',
+      POPUP: 'popup',
+      PANEL: 'panel',
+      APP: 'app',
+      DEVTOOLS: 'devtools',
+      CUSTOM_TAB: 'custom-tab',
+    }
+
     class Event<T extends Function> implements Partial<chrome.events.Event<T>> {
       private listeners: T[] = []
 
@@ -898,6 +908,30 @@ export const injectExtensionAPIs = () => {
             onClicked: new ExtensionEvent<
               (info: chrome.contextMenus.OnClickData, tab: chrome.tabs.Tab) => void
             >('contextMenus.onClicked'),
+            // Chrome's constant and enums; an extension sizes its toolbar menu by the first.
+            ACTION_MENU_TOP_LEVEL_LIMIT: 6,
+            ContextType: {
+              ALL: 'all',
+              PAGE: 'page',
+              FRAME: 'frame',
+              SELECTION: 'selection',
+              LINK: 'link',
+              EDITABLE: 'editable',
+              IMAGE: 'image',
+              VIDEO: 'video',
+              AUDIO: 'audio',
+              LAUNCHER: 'launcher',
+              BROWSER_ACTION: 'browser_action',
+              PAGE_ACTION: 'page_action',
+              ACTION: 'action',
+              TAB: 'tab',
+            },
+            ItemType: {
+              NORMAL: 'normal',
+              CHECKBOX: 'checkbox',
+              RADIO: 'radio',
+              SEPARATOR: 'separator',
+            },
           }
 
           return api
@@ -1786,6 +1820,38 @@ export const injectExtensionAPIs = () => {
             onMoved: new ExtensionEvent('tabs.onMoved'),
             onDetached: new ExtensionEvent('tabs.onDetached'),
             onAttached: new ExtensionEvent('tabs.onAttached'),
+            /*
+              Constants Chrome defines and Electron's native namespace does not (measured on 44.9.3
+              with no library loaded: `TAB_ID_NONE` and friends read undefined). They are read at the
+              top of a worker, where `undefined` turns a comparison into a silent wrong branch — or
+              a crash, when it is used as a key. Native enums win when Electron has them.
+            */
+            ...({
+              TAB_ID_NONE: -1,
+              TAB_INDEX_NONE: -1,
+              SPLIT_VIEW_ID_NONE: -1,
+              MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND: 2,
+              MutedInfoReason: (base as any)?.MutedInfoReason ?? {
+                USER: 'user',
+                CAPTURE: 'capture',
+                EXTENSION: 'extension',
+              },
+              TabStatus: (base as any)?.TabStatus ?? {
+                UNLOADED: 'unloaded',
+                LOADING: 'loading',
+                COMPLETE: 'complete',
+              },
+              WindowType: (base as any)?.WindowType ?? WINDOW_TYPE,
+              ZoomSettingsMode: (base as any)?.ZoomSettingsMode ?? {
+                AUTOMATIC: 'automatic',
+                MANUAL: 'manual',
+                DISABLED: 'disabled',
+              },
+              ZoomSettingsScope: (base as any)?.ZoomSettingsScope ?? {
+                PER_ORIGIN: 'per-origin',
+                PER_TAB: 'per-tab',
+              },
+            } as any),
           }
           return api
         },
@@ -1828,6 +1894,17 @@ export const injectExtensionAPIs = () => {
             ...base,
             WINDOW_ID_NONE: -1,
             WINDOW_ID_CURRENT: -2,
+            // Chrome's enums, which this namespace did not carry (Electron has no chrome.windows):
+            // `chrome.windows.CreateType.POPUP` read at worker top level threw on undefined.
+            WindowType: WINDOW_TYPE,
+            WindowState: {
+              NORMAL: 'normal',
+              MINIMIZED: 'minimized',
+              MAXIMIZED: 'maximized',
+              FULLSCREEN: 'fullscreen',
+              LOCKED_FULLSCREEN: 'locked-fullscreen',
+            },
+            CreateType: { NORMAL: 'normal', POPUP: 'popup', PANEL: 'panel' },
             get: invokeExtension('windows.get'),
             getCurrent: invokeExtension('windows.getCurrent'),
             getLastFocused: invokeExtension('windows.getLastFocused'),
