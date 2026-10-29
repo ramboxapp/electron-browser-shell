@@ -1990,6 +1990,56 @@ export const injectExtensionAPIs = () => {
       string,
       { shouldInject?: () => boolean; factory: (base: any) => any }
     > = {
+      browsingData: {
+        shouldInject: () => declares('browsingData'),
+        factory: () => {
+          const DATA_TYPES = [
+            'appcache',
+            'cache',
+            'cacheStorage',
+            'cookies',
+            'downloads',
+            'fileSystems',
+            'formData',
+            'history',
+            'indexedDB',
+            'localStorage',
+            'passwords',
+            'pluginData',
+            'serviceWorkers',
+            'webSQL',
+          ]
+          const remove = invokeExtension('browsingData.remove')
+          // removeCookies(options, callback?) is remove(options, { cookies: true }, callback?).
+          const removeOne =
+            (type: string) =>
+            (...args: any[]) => {
+              const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+              const forward = [args[0] || {}, { [type]: true }]
+              return callback ? remove(...forward, callback) : remove(...forward)
+            }
+          const capitalised = (type: string) => type[0].toUpperCase() + type.slice(1)
+          const api: Record<string, unknown> = {
+            remove: (...args: any[]) => {
+              const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+              const forward = [args[0] || {}, args[1] || {}]
+              return callback ? remove(...forward, callback) : remove(...forward)
+            },
+            settings: answering(() => ({
+              options: {
+                since: 0,
+                originTypes: { unprotectedWeb: true, protectedWeb: false, extension: false },
+              },
+              dataToRemove: Object.fromEntries(DATA_TYPES.map((type) => [type, false])),
+              dataRemovalPermitted: Object.fromEntries(DATA_TYPES.map((type) => [type, true])),
+            })),
+          }
+          for (const type of DATA_TYPES) {
+            api[`remove${type === 'webSQL' ? 'WebSQL' : capitalised(type)}`] = removeOne(type)
+          }
+          return api
+        },
+      },
     }
 
     // Initialize APIs

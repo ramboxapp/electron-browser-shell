@@ -27,6 +27,7 @@ import { checkLicense, License } from './license'
 import { readLoadedExtensionManifest } from './manifest'
 import { PermissionsAPI } from './api/permissions'
 import { WebSocketAPI } from './api/websocket'
+import { BrowsingDataAPI } from './api/browsing-data'
 import { resolvePartition } from './partition'
 
 function checkVersion() {
@@ -141,6 +142,7 @@ export class ElectronChromeExtensions extends EventEmitter {
   private api: {
     alarms: AlarmsAPI
     browserAction: BrowserActionAPI
+    browsingData: BrowsingDataAPI
     contextMenus: ContextMenusAPI
     commands: CommandsAPI
     cookies: CookiesAPI
@@ -185,6 +187,7 @@ export class ElectronChromeExtensions extends EventEmitter {
     this.api = {
       alarms: new AlarmsAPI(this.ctx),
       browserAction: new BrowserActionAPI(this.ctx),
+      browsingData: new BrowsingDataAPI(this.ctx),
       contextMenus: new ContextMenusAPI(this.ctx),
       commands: new CommandsAPI(this.ctx),
       cookies: new CookiesAPI(this.ctx),
