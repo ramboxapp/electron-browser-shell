@@ -28,6 +28,7 @@ import { readLoadedExtensionManifest } from './manifest'
 import { PermissionsAPI } from './api/permissions'
 import { WebSocketAPI } from './api/websocket'
 import { BrowsingDataAPI } from './api/browsing-data'
+import { InstanceIDAPI } from './api/instance-id'
 import { PageCaptureAPI } from './api/page-capture'
 import { SystemAPI } from './api/system'
 import { resolvePartition } from './partition'
@@ -151,6 +152,7 @@ export class ElectronChromeExtensions extends EventEmitter {
     downloads: DownloadsAPI
     identity: IdentityAPI
     idle: IdleAPI
+    instanceID: InstanceIDAPI
     management: ManagementAPI
     notifications: NotificationsAPI
     offscreen: OffscreenAPI
@@ -198,6 +200,7 @@ export class ElectronChromeExtensions extends EventEmitter {
       downloads: new DownloadsAPI(this.ctx),
       identity: new IdentityAPI(this.ctx),
       idle: new IdleAPI(this.ctx),
+      instanceID: new InstanceIDAPI(this.ctx),
       management: new ManagementAPI(this.ctx),
       notifications: new NotificationsAPI(this.ctx),
       offscreen: new OffscreenAPI(this.ctx),

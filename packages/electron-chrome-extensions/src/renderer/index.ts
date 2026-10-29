@@ -2103,6 +2103,23 @@ export const injectExtensionAPIs = () => {
         },
       },
 
+      /*
+        instanceID rides on the `gcm` permission, as in Chrome. The identity half is local and real
+        (a stable id per extension, kept in the session); tokens need Google's servers, which only
+        Chrome's GCM client reaches, and fail as `gcm.register` does.
+      */
+      instanceID: {
+        shouldInject: () => declares('gcm'),
+        factory: () => ({
+          getID: invokeExtension('instanceID.getID'),
+          getCreationTime: invokeExtension('instanceID.getCreationTime'),
+          deleteID: invokeExtension('instanceID.deleteID'),
+          getToken: failWith('UNKNOWN_ERROR'),
+          deleteToken: failWith('UNKNOWN_ERROR'),
+          onTokenRefresh: inert(),
+        }),
+      },
+
       pageCapture: {
         shouldInject: () => declares('pageCapture'),
         factory: () => {
