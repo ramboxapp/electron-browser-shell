@@ -28,6 +28,7 @@ import { readLoadedExtensionManifest } from './manifest'
 import { PermissionsAPI } from './api/permissions'
 import { WebSocketAPI } from './api/websocket'
 import { BrowsingDataAPI } from './api/browsing-data'
+import { PageCaptureAPI } from './api/page-capture'
 import { SystemAPI } from './api/system'
 import { resolvePartition } from './partition'
 
@@ -153,6 +154,7 @@ export class ElectronChromeExtensions extends EventEmitter {
     management: ManagementAPI
     notifications: NotificationsAPI
     offscreen: OffscreenAPI
+    pageCapture: PageCaptureAPI
     permissions: PermissionsAPI
     runtime: RuntimeAPI
     system: SystemAPI
@@ -199,6 +201,7 @@ export class ElectronChromeExtensions extends EventEmitter {
       management: new ManagementAPI(this.ctx),
       notifications: new NotificationsAPI(this.ctx),
       offscreen: new OffscreenAPI(this.ctx),
+      pageCapture: new PageCaptureAPI(this.ctx),
       permissions: new PermissionsAPI(this.ctx),
       runtime: new RuntimeAPI(this.ctx),
       system: new SystemAPI(this.ctx),

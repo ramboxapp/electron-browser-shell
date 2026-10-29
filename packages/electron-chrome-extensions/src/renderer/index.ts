@@ -2102,6 +2102,28 @@ export const injectExtensionAPIs = () => {
           return api
         },
       },
+
+      pageCapture: {
+        shouldInject: () => declares('pageCapture'),
+        factory: () => {
+          const save = invokeExtension('pageCapture.saveAsMHTML')
+          return {
+            // The main process saves the page as MHTML and sends the bytes; the Blob is built here,
+            // since a Blob does not cross the IPC.
+            saveAsMHTML: (...args: any[]) => {
+              const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+              const promise = (save(args[0] || {}) as Promise<Uint8Array>).then(
+                (bytes) => new Blob([bytes as any], { type: 'multipart/related' }),
+              )
+              if (!callback) return promise
+              promise.then(
+                (blob) => callback(blob),
+                (error) => withLastError(errorMessage(error), () => callback()),
+              )
+            },
+          }
+        },
+      },
     }
 
     // Initialize APIs
