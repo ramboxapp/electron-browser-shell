@@ -1,0 +1,45 @@
+{
+  "name": "chrome-floor-mv3",
+  "version": "1.0",
+  "manifest_version": 3,
+  "description": "Declares every namespace of the anti-crash floor, for chrome-absent-namespaces-spec and the specs of its real parts.",
+  "background": { "service_worker": "background.js" },
+  "omnibox": { "keyword": "floor" },
+  "content_scripts": [
+    { "matches": ["<all_urls>"], "js": ["content-script.js"], "run_at": "document_end" },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["main-world.js"],
+      "run_at": "document_end",
+      "world": "MAIN"
+    }
+  ],
+  "permissions": [
+    "accessibilityFeatures.read",
+    "bookmarks",
+    "browsingData",
+    "contentSettings",
+    "contextMenus",
+    "debugger",
+    "declarativeContent",
+    "desktopCapture",
+    "gcm",
+    "history",
+    "pageCapture",
+    "privacy",
+    "readingList",
+    "search",
+    "sessions",
+    "system.cpu",
+    "system.display",
+    "system.memory",
+    "system.storage",
+    "tabCapture",
+    "tabGroups",
+    "tabs",
+    "tts",
+    "ttsEngine",
+    "webAuthenticationProxy"
+  ],
+  "host_permissions": ["<all_urls>"]
+}

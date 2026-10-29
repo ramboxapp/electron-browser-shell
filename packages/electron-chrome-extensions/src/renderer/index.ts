@@ -1986,10 +1986,101 @@ export const injectExtensionAPIs = () => {
       ) as Record<string, string>
     const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value))
 
+    /** `chrome.contentSettings.<x>`: reads Chrome's default, refuses to change what it cannot. */
+    class ContentSetting {
+      private readonly setting!: () => string
+      constructor(setting: string) {
+        Object.defineProperty(this, 'setting', { value: () => setting, enumerable: false })
+      }
+      get = answering(() => ({ setting: this.setting() }))
+      // The host owns these permissions (Rambox asks the user per service), so a write that would
+      // change nothing fails instead of reporting success.
+      set = failWith('Content settings are controlled by the application.')
+      clear = failWith('Content settings are controlled by the application.')
+      getResourceIdentifiers = answering(() => undefined)
+    }
+
     const floorDefinitions: Record<
       string,
       { shouldInject?: () => boolean; factory: (base: any) => any }
     > = {
+      declarativeContent: {
+        shouldInject: () => declares('declarativeContent'),
+        factory: () => {
+          // Rule constructors. `new PageStateMatcher(opts)` serialises to opts plus `instanceType`,
+          // as Chrome's do; a call without `new` throws, as Chrome's does.
+          const declarative = (instanceType: string) => {
+            const Ctor: any = function (this: any, options?: Record<string, unknown>) {
+              if (!(this instanceof Ctor)) {
+                throw new TypeError(`${instanceType} must be called with new`)
+              }
+              Object.assign(this, options)
+              this.instanceType = instanceType
+            }
+            // Named as Chrome's are: `PageStateMatcher.name === 'PageStateMatcher'`.
+            Object.defineProperty(Ctor, 'name', { value: instanceType.split('.')[1] })
+            return Ctor
+          }
+          /*
+            The rules are kept and answered back, not evaluated: no extension in the catalog was seen
+            to depend on a page action appearing (Everhour declares the permission). Kept per
+            context — a rule added by the worker is the worker's — which is enough for the
+            add-then-read pattern; evaluating them on navigation is stage 2 if someone needs it.
+          */
+          let rules: any[] = []
+          let nextRuleId = 0
+          const ruleCallback = (args: any[]) =>
+            typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+          const onPageChanged: any = inert()
+          onPageChanged.addRules = (...args: any[]) => {
+            const callback = ruleCallback(args)
+            const added = clone(args[0] || []).map((rule: any) => ({
+              ...rule,
+              id: rule.id ?? `_${nextRuleId++}_`,
+              priority: rule.priority ?? 100,
+            }))
+            const duplicate = added.find((rule: any) => rules.some((r) => r.id === rule.id))
+            if (duplicate) {
+              if (callback) {
+                queueMicrotask(() =>
+                  withLastError(`Duplicate rule ID: ${duplicate.id}`, () => callback()),
+                )
+              }
+              return
+            }
+            rules = rules.concat(added)
+            if (callback) queueMicrotask(() => callback(clone(added)))
+          }
+          onPageChanged.getRules = (...args: any[]) => {
+            const callback = ruleCallback(args)
+            const ids: string[] | undefined = args[0]
+            const found = ids ? rules.filter((rule) => ids.includes(rule.id)) : rules
+            if (callback) queueMicrotask(() => callback(clone(found)))
+          }
+          onPageChanged.removeRules = (...args: any[]) => {
+            const callback = ruleCallback(args)
+            const ids: string[] | undefined = args[0]
+            rules = ids ? rules.filter((rule) => !ids.includes(rule.id)) : []
+            if (callback) queueMicrotask(() => callback())
+          }
+          const types = {
+            PageStateMatcher: 'declarativeContent.PageStateMatcher',
+            ShowAction: 'declarativeContent.ShowAction',
+            ShowPageAction: 'declarativeContent.ShowPageAction',
+            SetIcon: 'declarativeContent.SetIcon',
+            RequestContentScript: 'declarativeContent.RequestContentScript',
+          }
+          const api: Record<string, unknown> = { onPageChanged }
+          for (const [name, instanceType] of Object.entries(types)) {
+            api[name] = declarative(instanceType)
+            // 'declarativeContent.PageStateMatcher' → 'DECLARATIVE_CONTENT.PAGE_STATE_MATCHER'
+            const enumKey = instanceType.replace(/([a-z])([A-Z])/g, '$1_$2').toUpperCase()
+            api[`${name}InstanceType`] = { [enumKey]: instanceType }
+          }
+          return api
+        },
+      },
+
       browsingData: {
         shouldInject: () => declares('browsingData'),
         factory: () => {
@@ -2103,6 +2194,275 @@ export const injectExtensionAPIs = () => {
         },
       },
 
+      contentSettings: {
+        shouldInject: () => declares('contentSettings'),
+        factory: () => {
+          // Chrome's defaults, as Edge 156 answers them for a fresh profile.
+          const defaults: Record<string, string> = {
+            autoVerify: 'allow',
+            automaticDownloads: 'ask',
+            camera: 'ask',
+            clipboard: 'ask',
+            cookies: 'allow',
+            fullscreen: 'allow',
+            images: 'allow',
+            javascript: 'allow',
+            location: 'ask',
+            microphone: 'ask',
+            mouselock: 'allow',
+            notifications: 'ask',
+            plugins: 'block',
+            popups: 'block',
+            sound: 'allow',
+            unsandboxedPlugins: 'block',
+          }
+          const api: Record<string, unknown> = {
+            Scope: enumOf('regular', 'incognito_session_only'),
+            AutoVerifyContentSetting: enumOf('allow', 'block'),
+            CameraContentSetting: enumOf('allow', 'block', 'ask'),
+            ClipboardContentSetting: enumOf('allow', 'block', 'ask'),
+            CookiesContentSetting: enumOf('allow', 'block', 'session_only'),
+            FullscreenContentSetting: enumOf('allow'),
+            ImagesContentSetting: enumOf('allow', 'block'),
+            JavascriptContentSetting: enumOf('allow', 'block'),
+            LocationContentSetting: enumOf('allow', 'block', 'ask'),
+            MicrophoneContentSetting: enumOf('allow', 'block', 'ask'),
+            MouselockContentSetting: enumOf('allow'),
+            MultipleAutomaticDownloadsContentSetting: enumOf('allow', 'block', 'ask'),
+            NotificationsContentSetting: enumOf('allow', 'block', 'ask'),
+            PluginsContentSetting: enumOf('block'),
+            PopupsContentSetting: enumOf('allow', 'block'),
+            PpapiBrokerContentSetting: enumOf('block'),
+            SoundContentSetting: enumOf('allow', 'block'),
+          }
+          for (const [name, setting] of Object.entries(defaults)) {
+            api[name] = new ContentSetting(setting)
+          }
+          return api
+        },
+      },
+
+      // Desktop Chrome exposes one setting here (Edge 156: animationPolicy); the rest is ChromeOS.
+      accessibilityFeatures: {
+        shouldInject: () => declares('accessibilityFeatures.read', 'accessibilityFeatures.modify'),
+        factory: () => ({ animationPolicy: new ChromeSetting('allowed') }),
+      },
+
+      bookmarks: {
+        shouldInject: () => declares('bookmarks'),
+        factory: () => {
+          // The two folders every Chrome profile has, both empty: Rambox keeps no bookmarks.
+          const created = Date.now()
+          const folder = (id: string, title: string, index: number, folderType: string) => ({
+            id,
+            parentId: '0',
+            index,
+            title,
+            dateAdded: created,
+            folderType,
+            syncing: false,
+            children: [] as any[],
+          })
+          const tree = () => [
+            {
+              id: '0',
+              title: '',
+              dateAdded: created,
+              syncing: false,
+              children: [
+                folder('1', 'Bookmarks bar', 0, 'bookmarks-bar'),
+                folder('2', 'Other bookmarks', 1, 'other'),
+              ],
+            },
+          ]
+          const find = (id: unknown) => {
+            const [root] = tree()
+            const node = [root, ...root.children].find((n) => n.id === String(id))
+            if (!node) throw new Error("Can't find bookmark for id.")
+            return node
+          }
+          const withoutChildren = ({ children, ...node }: any) => node
+          const notAvailable = failWith('Bookmarks are not available.')
+          return {
+            getTree: answering(tree),
+            getSubTree: answering((id) => [find(id)]),
+            getChildren: answering((id) => find(id).children.map(withoutChildren)),
+            get: answering((idOrIds) =>
+              (Array.isArray(idOrIds) ? idOrIds : [idOrIds]).map((id) => withoutChildren(find(id))),
+            ),
+            getRecent: answering(() => []),
+            search: answering(() => []),
+            create: notAvailable,
+            move: notAvailable,
+            update: notAvailable,
+            remove: notAvailable,
+            removeTree: notAvailable,
+            onCreated: inert(),
+            onRemoved: inert(),
+            onChanged: inert(),
+            onMoved: inert(),
+            onChildrenReordered: inert(),
+            onImportBegan: inert(),
+            onImportEnded: inert(),
+            MAX_WRITE_OPERATIONS_PER_HOUR: 1000000,
+            MAX_SUSTAINED_WRITE_OPERATIONS_PER_MINUTE: 1000000,
+            ROOT_NODE_ID: '0',
+            BookmarkTreeNodeUnmodifiable: { MANAGED: 'managed' },
+            FolderType: enumOf('bookmarks-bar', 'other', 'mobile', 'managed'),
+          }
+        },
+      },
+
+      // No history is kept here, which `topSites` already answers the same way.
+      history: {
+        shouldInject: () => declares('history'),
+        factory: () => ({
+          search: answering(() => []),
+          getVisits: answering(() => []),
+          addUrl: answering(() => undefined),
+          deleteUrl: answering(() => undefined),
+          deleteRange: answering(() => undefined),
+          deleteAll: answering(() => undefined),
+          onVisited: inert(),
+          onVisitRemoved: inert(),
+          TransitionType: enumOf(
+            'link',
+            'typed',
+            'auto_bookmark',
+            'auto_subframe',
+            'manual_subframe',
+            'generated',
+            'auto_toplevel',
+            'form_submit',
+            'reload',
+            'keyword',
+            'keyword_generated',
+          ),
+        }),
+      },
+
+      sessions: {
+        shouldInject: () => declares('sessions'),
+        factory: () => ({
+          getRecentlyClosed: answering(() => []),
+          getDevices: answering(() => []),
+          restore: failWith((sessionId?: string) =>
+            sessionId === undefined
+              ? 'There are no recently closed sessions.'
+              : `Invalid session id: "${sessionId}".`,
+          ),
+          onChanged: inert(),
+          MAX_SESSION_RESULTS: 25,
+        }),
+      },
+
+      // The embedder's tabs are never grouped: every query is empty, every id unknown.
+      tabGroups: {
+        shouldInject: () => declares('tabGroups'),
+        factory: () => {
+          const noGroup = failWith((groupId: unknown) => `No group with id: ${groupId}.`)
+          return {
+            query: answering(() => []),
+            get: noGroup,
+            update: noGroup,
+            move: noGroup,
+            onCreated: inert(),
+            onMoved: inert(),
+            onRemoved: inert(),
+            onUpdated: inert(),
+            TAB_GROUP_ID_NONE: -1,
+            Color: enumOf(
+              'grey',
+              'blue',
+              'red',
+              'yellow',
+              'green',
+              'pink',
+              'purple',
+              'cyan',
+              'orange',
+            ),
+          }
+        },
+      },
+
+      readingList: {
+        shouldInject: () => declares('readingList'),
+        factory: () => ({
+          query: answering(() => []),
+          addEntry: failWith('Reading list is not available.'),
+          removeEntry: failWith('URL not found.'),
+          updateEntry: failWith('URL not found.'),
+          onEntryAdded: inert(),
+          onEntryRemoved: inert(),
+          onEntryUpdated: inert(),
+        }),
+      },
+
+      tts: {
+        shouldInject: () => declares('tts'),
+        factory: () => ({
+          getVoices: answering(() => []),
+          isSpeaking: answering(() => false),
+          // There is no voice to speak with. The utterance's own onEvent learns it the way Chrome
+          // tells it about a failed utterance; the call itself succeeds, as Chrome's does.
+          speak: answering((_utterance: unknown, options?: { onEvent?: Function }) => {
+            if (options && typeof options.onEvent === 'function') {
+              const onEvent = options.onEvent
+              queueMicrotask(() =>
+                onEvent({ type: 'error', charIndex: 0, errorMessage: 'No voice available.' }),
+              )
+            }
+            return undefined
+          }),
+          stop: noop,
+          pause: noop,
+          resume: noop,
+          onEvent: inert(),
+          onVoicesChanged: inert(),
+          EventType: enumOf(
+            'start',
+            'end',
+            'word',
+            'sentence',
+            'marker',
+            'interrupted',
+            'cancelled',
+            'error',
+            'pause',
+            'resume',
+          ),
+          VoiceGender: enumOf('male', 'female'),
+        }),
+      },
+
+      // A speech engine nobody here will ask to speak: the calls go nowhere, the events never fire.
+      ttsEngine: {
+        shouldInject: () => declares('ttsEngine'),
+        factory: () => ({
+          updateVoices: noop,
+          updateLanguage: noop,
+          sendTtsEvent: noop,
+          sendTtsAudio: noop,
+          onSpeak: inert(),
+          onSpeakWithAudioStream: inert(),
+          onStop: inert(),
+          onPause: inert(),
+          onResume: inert(),
+          onInstallLanguageRequest: inert(),
+          onLanguageStatusRequest: inert(),
+          onUninstallLanguageRequest: inert(),
+          LanguageInstallStatus: {
+            NOT_INSTALLED: 'notInstalled',
+            INSTALLING: 'installing',
+            INSTALLED: 'installed',
+            FAILED: 'failed',
+          },
+          TtsClientSource: enumOf('chromefeature', 'extension'),
+          VoiceGender: enumOf('male', 'female'),
+        }),
+      },
+
       /*
         instanceID rides on the `gcm` permission, as in Chrome. The identity half is local and real
         (a stable id per extension, kept in the session); tokens need Google's servers, which only
@@ -2117,6 +2477,42 @@ export const injectExtensionAPIs = () => {
           getToken: failWith('UNKNOWN_ERROR'),
           deleteToken: failWith('UNKNOWN_ERROR'),
           onTokenRefresh: inert(),
+        }),
+      },
+
+      desktopCapture: {
+        shouldInject: () => declares('desktopCapture'),
+        factory: () => {
+          let nextRequestId = 0
+          return {
+            /*
+              Callback-only, returning a request id, as Chrome's. There is no picker in the host, so
+              the answer is the one Chrome gives when the user cancels it: an empty stream id.
+            */
+            chooseDesktopMedia: (...args: any[]) => {
+              const callback = args.reverse().find((arg) => typeof arg === 'function')
+              const requestId = ++nextRequestId
+              if (callback) queueMicrotask(() => callback('', { canRequestAudioTrack: false }))
+              return requestId
+            },
+            cancelChooseDesktopMedia: noop,
+            DesktopCaptureSourceType: enumOf('screen', 'window', 'tab', 'audio'),
+            SelfCapturePreferenceEnum: enumOf('include', 'exclude'),
+            SystemAudioPreferenceEnum: enumOf('include', 'exclude'),
+            WindowAudioPreferenceEnum: enumOf('system', 'window', 'exclude'),
+          }
+        },
+      },
+
+      tabCapture: {
+        shouldInject: () => declares('tabCapture'),
+        factory: () => ({
+          getMediaStreamId: failWith(
+            'Extension has not been invoked for the current page (see activeTab permission). Chrome pages cannot be captured.',
+          ),
+          getCapturedTabs: answering(() => []),
+          onStatusChanged: inert(),
+          TabCaptureState: enumOf('pending', 'active', 'stopped', 'error'),
         }),
       },
 
@@ -2138,6 +2534,76 @@ export const injectExtensionAPIs = () => {
                 (error) => withLastError(errorMessage(error), () => callback()),
               )
             },
+          }
+        },
+      },
+
+      // Declared by a manifest key, not a permission. There is no address bar for it to live in.
+      omnibox: {
+        shouldInject: () => !!(manifest as any).omnibox,
+        factory: () => ({
+          setDefaultSuggestion: answering(() => undefined),
+          sendSuggestions: noop,
+          onInputStarted: inert(),
+          onInputChanged: inert(),
+          onInputEntered: inert(),
+          onInputCancelled: inert(),
+          onDeleteSuggestion: inert(),
+          onActionExecuted: inert(),
+          DescriptionStyleType: enumOf('url', 'match', 'dim'),
+          OnInputEnteredDisposition: {
+            CURRENT_TAB: 'currentTab',
+            NEW_FOREGROUND_TAB: 'newForegroundTab',
+            NEW_BACKGROUND_TAB: 'newBackgroundTab',
+          },
+        }),
+      },
+
+      search: {
+        shouldInject: () => declares('search'),
+        factory: () => ({
+          // Failing is the honest answer: resolving would tell the extension a search ran.
+          query: failWith('Search is not available.'),
+          Disposition: { CURRENT_TAB: 'CURRENT_TAB', NEW_TAB: 'NEW_TAB', NEW_WINDOW: 'NEW_WINDOW' },
+        }),
+      },
+
+      debugger: {
+        shouldInject: () => declares('debugger'),
+        factory: () => {
+          const notAttached = failWith(
+            (target?: { tabId?: number }) =>
+              `Debugger is not attached to the tab with id: ${target?.tabId}.`,
+          )
+          return {
+            attach: failWith('Cannot attach to this target.'),
+            detach: notAttached,
+            sendCommand: notAttached,
+            getTargets: answering(() => []),
+            onEvent: inert(),
+            onDetach: inert(),
+            DetachReason: enumOf('target_closed', 'canceled_by_user'),
+            TargetInfoType: enumOf('page', 'background_page', 'worker', 'other'),
+          }
+        },
+      },
+
+      webAuthenticationProxy: {
+        shouldInject: () => declares('webAuthenticationProxy'),
+        factory: () => {
+          const noRequest = failWith('Invalid requestId.')
+          return {
+            // Chrome's attach resolves with an error string when it cannot attach, never rejects.
+            attach: answering(() => 'Web authentication proxying is not available.'),
+            detach: answering(() => undefined),
+            completeCreateRequest: noRequest,
+            completeGetRequest: noRequest,
+            completeIsUvpaaRequest: noRequest,
+            onCreateRequest: inert(),
+            onGetRequest: inert(),
+            onIsUvpaaRequest: inert(),
+            onRemoteSessionStateChange: inert(),
+            onRequestCanceled: inert(),
           }
         },
       },
