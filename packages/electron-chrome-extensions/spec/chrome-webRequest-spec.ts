@@ -113,3 +113,36 @@ describe('chrome.webRequest', () => {
     })
   })
 })
+
+/*
+  The MV3 case: listeners registered at the top of a SERVICE WORKER, which is how every extension in
+  Rambox's catalog registers them (the describe above uses an MV2 background page). Measured on
+  29/10/2026 in the bench with real extensions on Electron 44.9.3: 0 events against 4/4/4/1 in a
+  real Chromium. This pins the answer per Electron version, from the worker's own listeners.
+*/
+describe('chrome.webRequest from an MV3 service worker', () => {
+  const server = useServer()
+  const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc-mv3' })
+
+  it('delivers onBeforeRequest, onHeadersReceived and onCompleted for a page the tab loads', async function () {
+    const major = parseInt(process.versions.electron, 10)
+    // Electron 43 has no webRequest events at all (see above); nothing to deliver there.
+    if (major === 43) return this.skip()
+    const before: any = await browser.crx.raw({ type: 'webrequest-mv3-results' })
+    expect(before.errors, 'addListener threw at worker top level').to.deep.equal([])
+
+    await browser.webContents.loadURL(server.getUrl() + 'mv3-probe')
+    // Events arrive asynchronously; give them a moment.
+    let seen: any = before
+    for (let i = 0; i < 20; i++) {
+      seen = await browser.crx.raw({ type: 'webrequest-mv3-results' })
+      if (seen.onCompleted.some((url: string) => url.includes('mv3-probe'))) break
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    const hit = (name: string) => seen[name].some((url: string) => url.includes('mv3-probe'))
+    expect(hit('onBeforeRequest'), `onBeforeRequest saw ${JSON.stringify(seen.onBeforeRequest)}`).to
+      .be.true
+    expect(hit('onHeadersReceived'), 'onHeadersReceived').to.be.true
+    expect(hit('onCompleted'), 'onCompleted').to.be.true
+  })
+})

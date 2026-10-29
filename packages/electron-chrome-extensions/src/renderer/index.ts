@@ -1926,6 +1926,19 @@ export const injectExtensionAPIs = () => {
     // disabled (getEnabledRulesets() returns []). Calling updateEnabledRulesets
     // once at service-worker startup activates them, matching Chrome's default.
     // Dynamic and session rules already work natively and need no help here.
+    /*
+      Known cost on Electron 44 (44.5.1, 44.9.3 and 44.10.0 stock, measured 29/10/2026 with uBlock in
+      Rambox's bench; 43 is fine): once ANY `updateEnabledRulesets` has run for an extension — this
+      one, or the extension's own, which uBlock issues at boot — its dynamic ruleset is gone for the
+      session: persisted dynamic rules do not load and every `updateDynamicRules` fails with
+      "Internal error while updating dynamic rules.". And without an enable on a launch after the
+      first, Electron 44 does not restore the enabled static rulesets either (`getEnabledRulesets()`
+      stays `[]`). So on 44 it is static blocking or dynamic rules, not both, and this keeps the
+      static rulesets — the blocking an extension ships with. Skipping the call on later launches
+      (prefs say the rulesets are remembered) and deferring it were both tried and change nothing:
+      the extension's own enable breaks the dynamic ruleset the same way. The fix is Electron's.
+      See docs/EXTENSION_CATALOG_HEALTH.md in the Rambox monorepo for the measurements.
+    */
     if (isServiceWorker && extensionId) {
       const dnr = (chrome as any).declarativeNetRequest
       const rulesets: any[] = (manifest as any).declarative_net_request?.rule_resources || []
