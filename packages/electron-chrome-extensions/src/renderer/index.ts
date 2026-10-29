@@ -1291,14 +1291,53 @@ export const injectExtensionAPIs = () => {
               // The one string setting of the group; 'default' is Chrome's own default policy.
               webRTCIPHandlingPolicy: new ChromeSetting('default'),
             },
+            /*
+              Every setting Chrome 156 lists (read from Edge), not only the ones an extension was seen
+              to read. A `.get` on a setting this object lacked threw "Cannot read properties of
+              undefined" — the failure that kept NordPass from booting, one level down. Rambox's API
+              probe found ten of them missing on 2026-10-29. Values describe Electron, not Chrome's defaults: no
+              autofill, no password manager, no Safe Browsing, no omnibox suggestions or translation
+              service; third-party cookies and referrers on; protected content on, since the app
+              ships Widevine; Topics, FLEDGE and ad measurement off.
+            */
             services: {
+              alternateErrorPagesEnabled: new ChromeSetting(false),
               autofillAddressEnabled: new ChromeSetting(false),
               autofillCreditCardEnabled: new ChromeSetting(false),
+              autofillEnabled: new ChromeSetting(false),
+              autofillSettings: new ChromeSetting([]),
               passwordSavingEnabled: new ChromeSetting(false),
+              safeBrowsingEnabled: new ChromeSetting(false),
+              safeBrowsingExtendedReportingEnabled: new ChromeSetting(false),
+              searchSuggestEnabled: new ChromeSetting(false),
+              spellingServiceEnabled: new ChromeSetting(false),
+              translationServiceEnabled: new ChromeSetting(false),
             },
             websites: {
+              adMeasurementEnabled: new ChromeSetting(false),
+              doNotTrackEnabled: new ChromeSetting(false),
+              fledgeEnabled: new ChromeSetting(false),
               hyperlinkAuditingEnabled: new ChromeSetting(false),
+              protectedContentEnabled: new ChromeSetting(true),
+              referrersEnabled: new ChromeSetting(true),
+              thirdPartyCookiesAllowed: new ChromeSetting(true),
+              topicsEnabled: new ChromeSetting(false),
             },
+            ...({
+              IPHandlingPolicy: {
+                DEFAULT: 'default',
+                DEFAULT_PUBLIC_AND_PRIVATE_INTERFACES: 'default_public_and_private_interfaces',
+                DEFAULT_PUBLIC_INTERFACE_ONLY: 'default_public_interface_only',
+                DISABLE_NON_PROXIED_UDP: 'disable_non_proxied_udp',
+              },
+              AutofillBlockedType: {
+                ALL: 'all',
+                CONTACT_INFO: 'contact_info',
+                IDENTITY_DOCS: 'identity_docs',
+                PAYMENTS: 'payments',
+                TRAVEL: 'travel',
+              },
+            } as any),
           }
         },
       },

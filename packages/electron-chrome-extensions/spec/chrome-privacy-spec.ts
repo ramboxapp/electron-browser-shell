@@ -22,12 +22,29 @@ describe('chrome.privacy', () => {
   const server = useServer()
   const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc-mv3' })
 
+  // Every setting Chrome 156 lists (read from Edge). Ten of them were missing until 2026-10-29, and a
+  // `.get` on a missing one threw — NordPass's failure, one level down.
   const settings = [
-    'privacy.services.passwordSavingEnabled',
+    'privacy.services.alternateErrorPagesEnabled',
     'privacy.services.autofillAddressEnabled',
     'privacy.services.autofillCreditCardEnabled',
+    'privacy.services.autofillEnabled',
+    'privacy.services.autofillSettings',
+    'privacy.services.passwordSavingEnabled',
+    'privacy.services.safeBrowsingEnabled',
+    'privacy.services.safeBrowsingExtendedReportingEnabled',
+    'privacy.services.searchSuggestEnabled',
+    'privacy.services.spellingServiceEnabled',
+    'privacy.services.translationServiceEnabled',
     'privacy.network.networkPredictionEnabled',
+    'privacy.websites.adMeasurementEnabled',
+    'privacy.websites.doNotTrackEnabled',
+    'privacy.websites.fledgeEnabled',
     'privacy.websites.hyperlinkAuditingEnabled',
+    'privacy.websites.protectedContentEnabled',
+    'privacy.websites.referrersEnabled',
+    'privacy.websites.thirdPartyCookiesAllowed',
+    'privacy.websites.topicsEnabled',
   ]
 
   for (const setting of settings) {
