@@ -55,7 +55,11 @@
     "storage",
     "tabs",
     "webRequest",
-    "webNavigation"
+    "webNavigation",
+    "identity",
+    "management",
+    "gcm",
+    "proxy"
   ],
   "optional_permissions": ["clipboardRead", "clipboardWrite"],
   "host_permissions": ["<all_urls>"],

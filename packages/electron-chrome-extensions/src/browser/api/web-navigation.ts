@@ -132,7 +132,14 @@ export class WebNavigationAPI {
     return (tab as any).mainFrame.framesInSubtree.filter(isLiveFrame).map(getFrameDetails)
   }
 
-  private sendNavigationEvent = (eventName: string, details: { url: string }) => {
+  private sendNavigationEvent = (eventName: string, details: { url: string; frameId?: number }) => {
+    /*
+      A subframe showing an extension's own page (Keeper's in-field prompt is one) is not a web
+      navigation: Chromium dispatches no webNavigation event for it, to that extension or any other
+      (measured on 28/10/2026 in Edge 156, where a web iframe on the same page does produce them).
+      A top-level extension page is left alone: that case has not been measured.
+    */
+    if (details.frameId !== 0 && String(details.url).startsWith('chrome-extension://')) return
     d(`${eventName} [url: ${details.url}]`)
     this.ctx.router.broadcastEvent(`webNavigation.${eventName}`, details)
   }
@@ -252,10 +259,8 @@ export class WebNavigationAPI {
       url: frame.url,
     }
     this.sendNavigationEvent('onDOMContentLoaded', details)
-
-    if (!tab.isLoadingMainFrame()) {
-      this.sendNavigationEvent('onCompleted', details)
-    }
+    // onCompleted is sent from did-frame-finish-load only. Sending it here as well, for every
+    // subframe that reached dom-ready after the main frame, reported each subframe twice.
   }
 
   private onFinishLoad = (
@@ -268,7 +273,8 @@ export class WebNavigationAPI {
     const frame = getFrame(frameProcessId, frameRoutingId)
     if (!isLiveFrame(frame)) return
 
-    const url = tab.getURL()
+    // The frame's URL, not the tab's: for a subframe they differ, and Chromium reports the frame's.
+    const url = frame.url
     const details: chrome.webNavigation.WebNavigationParentedCallbackDetails = {
       frameId: getFrameId(frame),
       parentFrameId: getParentFrameId(frame),

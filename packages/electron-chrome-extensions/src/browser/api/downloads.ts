@@ -70,8 +70,7 @@ export class DownloadsAPI {
     const request = this.pendingRequests.shift()
 
     if (request?.options.filename) {
-      const savePath = path.join(app.getPath('downloads'), request.options.filename)
-      item.setSavePath(savePath)
+      item.setSavePath(path.join(app.getPath('downloads'), request.options.filename))
     }
 
     const details: chrome.downloads.DownloadItem = {
@@ -154,6 +153,21 @@ export class DownloadsAPI {
   private download(event: ExtensionEvent, options: DownloadOptions): Promise<number> {
     if (!options?.url) {
       throw new Error('Invalid URL')
+    }
+
+    /*
+      A filename is relative to the downloads folder and stays inside it. Chrome rejects an absolute
+      path and any `..` segment with "Invalid filename"; here the name was joined as given, so an
+      extension could write anywhere the user can. Checked before the download starts, so a refused
+      request never reaches 'will-download' and cannot be matched to the wrong pending request.
+    */
+    if (typeof options.filename === 'string' && options.filename !== '') {
+      const downloads = app.getPath('downloads')
+      const target = path.resolve(downloads, options.filename)
+      const inside = target.startsWith(downloads + path.sep)
+      if (!inside || path.isAbsolute(options.filename) || /(^|[\\/])\.\.([\\/]|$)/.test(options.filename)) {
+        throw new Error('Invalid filename')
+      }
     }
 
     // Resolved with the download ID from onWillDownload once Electron emits

@@ -482,6 +482,10 @@ export class BrowserActionAPI {
         alignment,
       })
 
+      if (this.popup.browserWindow) {
+        this.ctx.store.extensionContextTypes.set(this.popup.browserWindow.webContents, 'POPUP')
+      }
+
       d(`opened popup: ${popupUrl}`)
 
       this.ctx.emit('browser-action-popup-created', this.popup)

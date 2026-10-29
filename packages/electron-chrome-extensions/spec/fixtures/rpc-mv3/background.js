@@ -266,7 +266,9 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       with, and lastError while it ran.
     */
     case 'native-port-missing-host': {
-      const port = chrome.runtime.connectNative('com.crx.host.that.is.not.installed')
+      const port = chrome.runtime.connectNative(
+        message.application || 'com.crx.host.that.is.not.installed',
+      )
       const timer = setTimeout(() => reply({ timedOut: true }), 10e3)
       port.onDisconnect.addListener((...args) => {
         clearTimeout(timer)
@@ -274,6 +276,18 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         reply({
           argCount: args.length,
           argIsPort: args[0] === port,
+          lastError: error ? error.message : null,
+        })
+      })
+      break
+    }
+
+    // sendNativeMessage's callback, and lastError while it ran.
+    case 'send-native-message': {
+      chrome.runtime.sendNativeMessage(message.application, { ping: true }, (response) => {
+        const error = chrome.runtime.lastError
+        reply({
+          response: response === undefined ? null : response,
           lastError: error ? error.message : null,
         })
       })
@@ -289,6 +303,13 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       })
       port.disconnect()
       setTimeout(() => reply({ fired }), 1000)
+      break
+    }
+
+    // What a service worker sees of chrome.extension.getViews: in Chrome, nothing (MV3 workers have
+    // no views to list, and the function is not there).
+    case 'extension-get-views-in-worker': {
+      reply({ type: typeof (chrome.extension && chrome.extension.getViews) })
       break
     }
 
@@ -340,6 +361,149 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
         got.push('close:' + e.code + ':' + e.wasClean)
         reply(got)
       }
+      break
+    }
+
+    /*
+      How an error of the main process reaches the extension, both ways a Chrome API is called.
+      offscreen.closeDocument() with no document open fails deterministically ("No current
+      offscreen document."), in Chrome and here.
+    */
+    case 'main-process-error-shapes': {
+      ;(async () => {
+        const out = {}
+        out.promise = await chrome.offscreen.closeDocument().then(
+          () => 'resolved',
+          (error) => 'rejected: ' + ((error && error.message) || error),
+        )
+        out.callback = await new Promise((resolve) => {
+          chrome.offscreen.closeDocument((...args) => {
+            const error = chrome.runtime.lastError
+            const during = error ? error.message : null
+            // Chrome clears it once the callback returns.
+            setTimeout(() =>
+              resolve({ during, argCount: args.length, after: typeof chrome.runtime.lastError }),
+            )
+          })
+        })
+        reply(out)
+      })()
+      return true
+    }
+
+    // setIcon with an ImageData drawn in the worker: Chrome accepts it, and so should this.
+    case 'set-icon-image-data': {
+      const size = message.size || 16
+      const image = new ImageData(size, size)
+      for (let i = 0; i < image.data.length; i += 4) {
+        image.data[i] = message.rgba[0]
+        image.data[i + 1] = message.rgba[1]
+        image.data[i + 2] = message.rgba[2]
+        image.data[i + 3] = message.rgba[3]
+      }
+      chrome.action.setIcon({ imageData: image }).then(
+        () => reply({ ok: true }),
+        (error) => reply({ ok: false, error: String((error && error.message) || error) }),
+      )
+      return true
+    }
+
+    // The account half of chrome.identity, which a worker with no Google account can still call.
+    case 'identity-shapes': {
+      ;(async () => {
+        const out = {}
+        out.profile = await chrome.identity.getProfileUserInfo()
+        out.tokenPromise = await chrome.identity.getAuthToken({ interactive: false }).then(
+          (token) => 'resolved: ' + JSON.stringify(token),
+          (error) => 'rejected: ' + ((error && error.message) || error),
+        )
+        out.tokenCallback = await new Promise((resolve) => {
+          chrome.identity.getAuthToken({ interactive: false }, (token) => {
+            resolve({
+              token: token === undefined ? 'undefined' : token,
+              lastError: chrome.runtime.lastError ? chrome.runtime.lastError.message : null,
+            })
+          })
+        })
+        out.accounts = await chrome.identity.getAccounts()
+        out.cleared = await chrome.identity.clearAllCachedAuthTokens().then(() => 'ok')
+        out.onSignInChanged = typeof chrome.identity.onSignInChanged.addListener
+        out.redirect = chrome.identity.getRedirectURL('/done')
+        out.accountStatus = chrome.identity.AccountStatus
+        reply(out)
+      })()
+      return true
+    }
+
+    /*
+      gcm, proxy and the sync constants: the shapes a worker reads at start-up (Endpoint
+      Verification's gcm.onMessage, NordVPN's proxy.settings, LanguageTool's sync.MAX_ITEMS) and
+      what each answers where Chrome, with no GCM client and a proxy it does not control, fails.
+    */
+    case 'platform-shapes': {
+      ;(async () => {
+        const out = {}
+        out.gcm = {
+          onMessage: typeof (chrome.gcm && chrome.gcm.onMessage && chrome.gcm.onMessage.addListener),
+          maxSize: chrome.gcm && chrome.gcm.MAX_MESSAGE_SIZE,
+          register: await chrome.gcm.register(['1234']).then(
+            (id) => 'resolved: ' + id,
+            (error) => 'rejected: ' + ((error && error.message) || error),
+          ),
+          registerCallback: await new Promise((resolve) =>
+            chrome.gcm.register(['1234'], () =>
+              resolve(chrome.runtime.lastError ? chrome.runtime.lastError.message : null),
+            ),
+          ),
+        }
+        out.proxy = {
+          get: await chrome.proxy.settings.get({}),
+          set: await chrome.proxy.settings.set({ value: { mode: 'direct' } }).then(() => 'resolved'),
+          after: await chrome.proxy.settings.get({}),
+          onProxyError: typeof (chrome.proxy.onProxyError && chrome.proxy.onProxyError.addListener),
+          mode: chrome.proxy.Mode && chrome.proxy.Mode.SYSTEM,
+        }
+        await chrome.storage.sync.set({ syncProbe: 'via-sync' })
+        out.sync = {
+          maxItems: chrome.storage.sync.MAX_ITEMS,
+          perItem: chrome.storage.sync.QUOTA_BYTES_PER_ITEM,
+          quota: chrome.storage.sync.QUOTA_BYTES,
+          // The alias still writes through to local.
+          readBack: (await chrome.storage.local.get('syncProbe')).syncProbe,
+          onChanged: typeof (chrome.storage.sync.onChanged && chrome.storage.sync.onChanged.addListener),
+        }
+        await chrome.storage.local.remove('syncProbe')
+        out.events = {
+          onSignInChangedHasListener: typeof chrome.identity.onSignInChanged.hasListener,
+          privacyOnChangeHasListeners:
+            typeof chrome.privacy.services.passwordSavingEnabled.onChange.hasListeners,
+        }
+        reply(out)
+      })()
+      return true
+    }
+
+    // What the worker sees of the tabs and management events it registers at start-up.
+    case 'event-shapes': {
+      const shape = (event) => ({
+        addListener: typeof (event && event.addListener),
+        hasListener: typeof (event && event.hasListener),
+      })
+      reply({
+        tabs: {
+          onHighlighted: shape(chrome.tabs.onHighlighted),
+          onZoomChange: shape(chrome.tabs.onZoomChange),
+          onMoved: shape(chrome.tabs.onMoved),
+          onDetached: shape(chrome.tabs.onDetached),
+          onAttached: shape(chrome.tabs.onAttached),
+        },
+        management: {
+          onInstalled: shape(chrome.management.onInstalled),
+          onUninstalled: shape(chrome.management.onUninstalled),
+          onEnabled: shape(chrome.management.onEnabled),
+          onDisabled: shape(chrome.management.onDisabled),
+        },
+      })
       break
     }
   }

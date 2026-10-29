@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { BrowserWindow, webContents as allWebContents } from 'electron'
 import { EventEmitter } from 'node:events'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -67,6 +68,7 @@ export class RuntimeAPI extends EventEmitter {
     handle('runtime.openOptionsPage', this.openOptionsPage)
     handle('runtime.sendNativeMessage', this.sendNativeMessage, { permission: 'nativeMessaging' })
     handle('runtime.takeInstalledDetails', this.takeInstalledDetails)
+    handle('runtime.getDocumentContexts', this.getDocumentContexts)
 
     this.installed = new SessionStateFile(ctx.session, 'installed', () => ({}))
     this.startedWorkersBefore = readStartedWorkers(ctx.session)
@@ -135,6 +137,56 @@ export class RuntimeAPI extends EventEmitter {
    * the first `addListener` of a background context, so the event reaches the listeners registered
    * while the worker starts — as in Chrome, which dispatches it after the script has evaluated.
    */
+  // A stable id per document, as Chromium's contextId is for the document's lifetime.
+  private contextIds = new WeakMap<Electron.WebContents, string>()
+
+  /**
+   * The extension's documents for `runtime.getContexts()`: every one of its pages open in this
+   * session, as OFFSCREEN_DOCUMENT, POPUP or TAB. The BACKGROUND entry is not here — Electron's own
+   * binding answers that one, with its real id, and the preload joins both lists and applies the
+   * filter.
+   */
+  private getDocumentContexts = ({ extension }: ExtensionEvent) => {
+    const origin = `chrome-extension://${extension.id}`
+    const contexts: chrome.runtime.ExtensionContext[] = []
+    for (const wc of allWebContents.getAllWebContents()) {
+      if (wc.isDestroyed() || wc.session !== this.ctx.session) continue
+      if (wc.getType() === 'remote' || wc.getType() === 'backgroundPage') continue
+      let url: string
+      try {
+        url = wc.getURL()
+      } catch {
+        continue
+      }
+      if (!url.startsWith(`${origin}/`)) continue
+      if (url.includes('_generated_background_page.html')) continue
+
+      const contextType = this.ctx.store.extensionContextTypes.get(wc) || 'TAB'
+      let contextId = this.contextIds.get(wc)
+      if (!contextId) {
+        contextId = randomUUID()
+        this.contextIds.set(wc, contextId)
+      }
+      // Chromium gives a tab and window only to a document in a tab (its documentation: -1 for the
+      // offscreen document, the popup and the background).
+      const isTab = contextType === 'TAB'
+      const win = isTab
+        ? this.ctx.store.tabToWindow.get(wc) || BrowserWindow.fromWebContents(wc)
+        : undefined
+      contexts.push({
+        contextType: contextType as chrome.runtime.ContextType,
+        contextId,
+        tabId: isTab ? wc.id : -1,
+        windowId: win && !win.isDestroyed() ? win.id : -1,
+        frameId: 0,
+        documentUrl: url,
+        documentOrigin: origin,
+        incognito: false,
+      })
+    }
+    return contexts
+  }
+
   private takeInstalledDetails = ({ extension }: ExtensionEvent) => {
     // A worker can ask before 'extension-loaded' reached this instance; settle the reason first then.
     if (!this.seen.has(extension.id)) this.onExtensionLoaded(extension)

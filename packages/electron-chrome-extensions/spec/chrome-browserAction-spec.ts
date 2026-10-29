@@ -1,6 +1,15 @@
 import * as path from 'node:path'
 import { expect } from 'chai'
-import { BrowserView, Extension, ipcMain, session, WebContents, WebContentsView } from 'electron'
+import {
+  BrowserView,
+  BrowserWindow,
+  Extension,
+  ipcMain,
+  nativeImage,
+  session,
+  WebContents,
+  WebContentsView,
+} from 'electron'
 
 import { emittedOnce } from './events-helpers'
 import { uuid } from './spec-helpers'
@@ -91,6 +100,65 @@ describe('chrome.browserAction', () => {
       const [_, tabDetails] = await tabPromise
       expect(tabDetails).to.be.an('object')
       expect(tabDetails.id).to.equal(browser.window.webContents.id)
+    })
+
+    /**
+     * An extension that opens its own window and then closes it with `tabs.remove` (NordPass,
+     * measured in Rambox on 20/10/2026) used to leave the store pointing at a window that no longer
+     * existed: the next click on its icon died with "Unable to get active tab" until some app got
+     * focus again. Chrome hands focus — and the active tab — back to a window that is still there.
+     */
+    const clickAndWaitForTab = async () => {
+      const tabPromise = emittedOnce(ipcMain, 'success')
+      let clickError: unknown
+      const click = activateExtension(
+        browser.partition,
+        browser.window.webContents,
+        browser.extension,
+      ).catch((error) => {
+        clickError = error
+      })
+      const timeout = new Promise((resolve) => setTimeout(resolve, 3000, 'timeout'))
+      const result: any = await Promise.race([tabPromise, timeout])
+      await click
+      if (result === 'timeout') throw new Error(`no onClicked: ${clickError ?? 'no error either'}`)
+      return result[1]
+    }
+
+    it('still finds the active tab after the focused window loses its only tab', async () => {
+      const other = new BrowserWindow({
+        show: false,
+        webPreferences: { session: browser.session, contextIsolation: true },
+      })
+      try {
+        await other.loadURL(server.getUrl())
+        browser.extensions.addTab(other.webContents, other)
+        other.emit('focus')
+        // What tabs.remove does with the extension's window tab.
+        browser.extensions.removeTab(other.webContents)
+
+        const tabDetails = await clickAndWaitForTab()
+        expect(tabDetails.id).to.equal(browser.window.webContents.id)
+      } finally {
+        other.destroy()
+      }
+    })
+
+    it('makes another tab of the window active when the active one is removed', async () => {
+      const view = new WebContentsView({
+        webPreferences: { session: browser.session, contextIsolation: true },
+      })
+      try {
+        await view.webContents.loadURL(server.getUrl())
+        browser.extensions.addTab(view.webContents, browser.window)
+        browser.extensions.selectTab(view.webContents)
+        browser.extensions.removeTab(view.webContents)
+
+        const tabDetails = await clickAndWaitForTab()
+        expect(tabDetails.id).to.equal(browser.window.webContents.id)
+      } finally {
+        view.webContents.close()
+      }
     })
   })
 
@@ -430,6 +498,38 @@ describe('chrome.browserAction', () => {
       )
 
       expect(result).to.equal('success')
+    })
+  })
+
+  /*
+    setIcon with an ImageData from an MV3 service worker. Chrome accepts it — it is how an
+    extension draws its icon state (a blocker's count, a dark-mode toggle) — and this dropped it
+    with a warning, so every such extension kept the manifest's static icon for ever.
+  */
+  describe('setIcon with imageData from a worker', () => {
+    const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc-mv3' })
+
+    it('serves the drawn image through crx://', async () => {
+      ElectronChromeExtensions.handleCRXProtocol(browser.session)
+      const rgba = [200, 30, 40, 255]
+      const result = await browser.crx.raw({ type: 'set-icon-image-data', rgba, size: 16 })
+      expect(result.ok, result.error).to.equal(true)
+
+      /*
+        Read back through the crx:// handler itself. Not `session.fetch` (it crashes Electron 43 on
+        this scheme, 0xffff7003) and not an <img> in a page (crx:// taints the canvas, so the pixels
+        cannot be read): the handler is what both of those would reach anyway.
+      */
+      const response: Response = (browser.extensions as any).api.browserAction.handleCRXRequest(
+        new Request(`crx://extension-icon/${browser.extension.id}/16/2?t=${Date.now()}`),
+      )
+      expect(response.status).to.equal(200)
+      const image = nativeImage.createFromBuffer(Buffer.from(await response.arrayBuffer()))
+      expect(image.isEmpty()).to.equal(false)
+      expect(image.getSize()).to.deep.equal({ width: 16, height: 16 })
+      // BGRA in the bitmap: the drawn red lands in the third byte.
+      const [b, g, r, a] = Array.from(image.toBitmap().subarray(0, 4))
+      expect([r, g, b, a]).to.deep.equal(rgba)
     })
   })
 })

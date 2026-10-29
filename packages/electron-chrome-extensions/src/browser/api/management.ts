@@ -8,16 +8,25 @@ import { ExtensionEvent } from '../router'
  */
 const createExtensionInfo = (extension: Electron.Extension): chrome.management.ExtensionInfo => {
   const manifest: chrome.runtime.Manifest = extension.manifest || {}
+  const optionsPage = manifest.options_page || manifest.options_ui?.page
+  const icons = Object.entries(manifest.icons || {})
+    .map(([size, file]) => ({ size: Number(size), url: `${extension.url}${file}` }))
+    .filter((icon) => Number.isFinite(icon.size))
   return {
     id: extension.id,
     name: extension.name,
     shortName: manifest.short_name || extension.name,
     description: manifest.description || '',
     version: extension.version,
+    versionName: manifest.version_name,
     enabled: true,
     disabledReason: undefined,
-    offlineEnabled: false,
-    optionsUrl: '',
+    offlineEnabled: !!manifest.offline_enabled,
+    // Chrome gives the options page's full URL; extensions open it from their own UI with it.
+    optionsUrl: optionsPage ? `${extension.url}${optionsPage}` : '',
+    homepageUrl: manifest.homepage_url,
+    updateUrl: manifest.update_url,
+    icons: icons.length ? icons : undefined,
     permissions: (manifest.permissions as string[]) || [],
     // MV2 mixes host permissions into 'permissions'; filter for URL patterns.
     hostPermissions:
@@ -26,7 +35,13 @@ const createExtensionInfo = (extension: Electron.Extension): chrome.management.E
         : ((manifest.permissions as string[]) || []).filter((permission) =>
             /:\/\/|<all_urls>/.test(permission),
           ),
-    installType: 'development',
+    /*
+      'normal', not 'development'. Electron can only "load unpacked", but what the embedder unpacks
+      is the Web Store package the user chose, and 'development' is the answer Chrome gives for a
+      developer's own checkout: extensions read it to switch on debug behaviour (verbose logging,
+      a dev backend, telemetry off) that the user of a store install never sees.
+    */
+    installType: 'normal',
     isApp: false,
     mayDisable: false,
     type: 'extension',
@@ -44,6 +59,28 @@ export class ManagementAPI {
     handle('management.get', this.get.bind(this))
     handle('management.getAll', this.getAll.bind(this))
     handle('management.getSelf', this.getSelf.bind(this))
+    // Warnings are Chrome's install-time UI; a loaded extension has none left to show.
+    handle('management.getPermissionWarningsById', () => [])
+    handle('management.getPermissionWarningsByManifest', () => [])
+    handle('management.setEnabled', () => {
+      throw new Error('The user did not accept the re-enable dialog.')
+    })
+    handle('management.uninstallSelf', () => {
+      throw new Error('Extension uninstall is not available here.')
+    })
+
+    /*
+      onInstalled and onUninstalled, from the session's own load and unload events. An extension that
+      watches what else is installed (an enterprise agent, a conflicting-extension check) registers
+      them at worker start, and a namespace without them threw there.
+    */
+    const sessionExtensions = ctx.session.extensions || ctx.session
+    sessionExtensions.on('extension-loaded', (_event, extension) => {
+      this.ctx.router.broadcastEvent('management.onInstalled', createExtensionInfo(extension))
+    })
+    sessionExtensions.on('extension-unloaded', (_event, extension) => {
+      this.ctx.router.broadcastEvent('management.onUninstalled', extension.id)
+    })
   }
 
   private getSessionExtensions() {

@@ -66,6 +66,8 @@ export const useExtensionBrowser = (opts: {
   extensionPath?: () => string
   openDevTools?: boolean
   assignTabDetails?: ChromeExtensionImpl['assignTabDetails']
+  /** What `windows.create` opens; specs of that API provide one, the rest leave it unimplemented. */
+  createWindow?: ChromeExtensionImpl['createWindow']
   /** Merged into the window's webPreferences — `webviewTag` for specs that need a real guest. */
   webPreferences?: Electron.WebPreferences
 }) => {
@@ -94,6 +96,7 @@ export const useExtensionBrowser = (opts: {
       assignTabDetails(details, tab) {
         opts.assignTabDetails?.(details, tab)
       },
+      ...(opts.createWindow ? { createWindow: opts.createWindow } : {}),
     })
 
     const extensionDir = opts.extensionPath

@@ -29,6 +29,12 @@ export class ExtensionStore extends EventEmitter {
 
   urlOverrides: Record<string, string> = {}
 
+  /**
+   * The extension documents that are not tabs, by what Chromium calls them in
+   * `runtime.getContexts()`. Anything else showing an extension URL is reported as a TAB.
+   */
+  extensionContextTypes = new WeakMap<Electron.WebContents, 'POPUP' | 'OFFSCREEN_DOCUMENT'>()
+
   constructor(public impl: ChromeExtensionImpl) {
     super()
   }
@@ -75,12 +81,27 @@ export class ExtensionStore extends EventEmitter {
     if (!this.windows.has(window)) return
 
     this.windows.delete(window)
+    this.forgetFocusedWindow(window)
 
     if (typeof this.impl.removeWindow === 'function') {
       await this.impl.removeWindow(window)
     } else {
       window.destroy()
     }
+  }
+
+  /**
+   * Hands "last focused" to a window that is still observed when the one holding it goes away, as
+   * Chrome moves focus to the next window. Otherwise every "current window" lookup — the action
+   * click, `tabs.query({ currentWindow: true })`, `windows.getCurrent()` — kept answering with a
+   * window that no longer existed, until some other window happened to take focus.
+   */
+  private forgetFocusedWindow(window: Electron.BaseWindow) {
+    if (!window || this.lastFocusedWindowId !== window.id) return
+    const candidates = Array.from(this.windows).filter((other) => !other.isDestroyed())
+    const withActiveTab = candidates.filter((other) => this.getActiveTabFromWindow(other))
+    const next = withActiveTab[withActiveTab.length - 1] || candidates[candidates.length - 1]
+    this.lastFocusedWindowId = next?.id
   }
 
   getTabById(tabId: number) {
@@ -111,12 +132,27 @@ export class ExtensionStore extends EventEmitter {
     this.tabs.delete(tab)
     this.tabToWindow.delete(tab)
 
-    // TODO: clear active tab
+    const remainingTabs = Array.from(this.tabs).filter(
+      (other) => !other.isDestroyed() && this.tabToWindow.get(other) === win,
+    )
+
+    // A removed tab cannot stay its window's active tab: Chrome activates another tab of the same
+    // window. Without this the window kept answering with the removed tab — or, once it was
+    // destroyed, with nothing — and a click on an extension icon failed with "Unable to get active
+    // tab".
+    if (win && this.windowToActiveTab.get(win) === tab) {
+      const next = remainingTabs[remainingTabs.length - 1]
+      if (next) {
+        this.setActiveTab(next)
+      } else {
+        this.windowToActiveTab.delete(win)
+      }
+    }
 
     // Clear window if it has no remaining tabs
-    const windowHasTabs = Array.from(this.tabs).find((tab) => this.tabToWindow.get(tab) === win)
-    if (!windowHasTabs) {
+    if (remainingTabs.length === 0) {
       this.windows.delete(win)
+      this.forgetFocusedWindow(win)
     }
 
     if (typeof this.impl.removeTab === 'function') {

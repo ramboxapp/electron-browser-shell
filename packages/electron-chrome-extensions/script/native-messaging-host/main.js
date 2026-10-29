@@ -1,23 +1,34 @@
 const fs = require('node:fs')
 
-function readMessage() {
-  let buffer = Buffer.alloc(4)
-  if (fs.readSync(0, buffer, 0, 4, null) !== 4) {
-    process.exit(1)
+/*
+  Reads one message the way a native messaging host must: a 4-byte little-endian BYTE length, then
+  that many bytes of UTF-8 JSON. A single readSync may return fewer bytes than asked for once the
+  message is larger than the pipe hands over at a time, so both reads loop until they have it all.
+*/
+function readExactly(length) {
+  const buffer = Buffer.alloc(length)
+  let offset = 0
+  while (offset < length) {
+    const read = fs.readSync(0, buffer, offset, length - offset, null)
+    if (read === 0) process.exit(1)
+    offset += read
   }
-
-  let messageLength = buffer.readUInt32LE(0)
-  let messageBuffer = Buffer.alloc(messageLength)
-  fs.readSync(0, messageBuffer, 0, messageLength, null)
-
-  return JSON.parse(messageBuffer.toString())
+  return buffer
 }
 
+function readMessage() {
+  const messageLength = readExactly(4).readUInt32LE(0)
+  return JSON.parse(readExactly(messageLength).toString('utf8'))
+}
+
+// The prefix counts bytes, not characters: `json.length` is wrong as soon as the message carries a
+// character outside ASCII, which is exactly what the multi-byte spec sends.
 function sendMessage(message) {
-  let json = JSON.stringify(message)
-  let buffer = Buffer.alloc(4 + json.length)
-  buffer.writeUInt32LE(json.length, 0)
-  buffer.write(json, 4)
+  const json = JSON.stringify(message)
+  const byteLength = Buffer.byteLength(json, 'utf8')
+  const buffer = Buffer.alloc(4 + byteLength)
+  buffer.writeUInt32LE(byteLength, 0)
+  buffer.write(json, 4, 'utf8')
 
   fs.writeSync(1, buffer)
 }

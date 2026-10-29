@@ -67,6 +67,7 @@ export class OffscreenAPI {
     })
 
     this.documents.set(extension.id, win)
+    this.ctx.store.extensionContextTypes.set(win.webContents, 'OFFSCREEN_DOCUMENT')
 
     // MV3 service workers can be recycled by Electron while awaiting a reply
     // from an offscreen document they just created, since nothing else

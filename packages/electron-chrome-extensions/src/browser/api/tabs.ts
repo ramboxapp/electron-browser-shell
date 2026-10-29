@@ -15,8 +15,9 @@ const validateExtensionUrl = (url: string, extension: Electron.Extension) => {
     throw new Error('Invalid URL')
   }
 
-  // Prevent creating chrome://kill or other debug commands
-  if (url.startsWith('chrome:') || url.startsWith('javascript:')) {
+  // Prevent creating chrome://kill or other debug commands. file: is refused too: Chrome only lets an
+  // extension open one with file access the user granted, which nothing here can grant.
+  if (/^(chrome|javascript|file):/i.test(url)) {
     throw new Error('Invalid URL')
   }
 
@@ -43,8 +44,23 @@ export class TabsAPI {
     handle('tabs.goForward', this.goForward.bind(this))
     handle('tabs.goBack', this.goBack.bind(this))
     handle('tabs.detectLanguage', this.detectLanguage.bind(this))
+    handle('tabs.duplicate', this.duplicate.bind(this))
+    handle('tabs.highlight', this.highlight.bind(this))
 
     this.ctx.store.on('tab-added', this.observeTab.bind(this))
+  }
+
+  /**
+   * The window a caller means by "current": for a page that is itself a tab, that tab's window; for
+   * anything else — the service worker, a popup, an offscreen document — the last focused one, which
+   * is also what Chrome resolves `currentWindow` to outside a tab.
+   */
+  private currentWindowIdFor(event: ExtensionEvent): number | undefined {
+    if (event.type === 'frame' && this.ctx.store.tabs.has(event.sender)) {
+      const win = this.ctx.store.tabToWindow.get(event.sender)
+      if (win && !win.isDestroyed()) return win.id
+    }
+    return this.ctx.store.lastFocusedWindowId
   }
 
   private observeTab(tab: TabContents) {
@@ -104,6 +120,24 @@ export class TabsAPI {
     }
     tab.on('page-favicon-updated', faviconHandler)
 
+    // tabs.onZoomChange, from the one zoom signal Electron gives: the user's own zoom gesture. A zoom
+    // the embedder sets programmatically is not reported here, which is a gap, not a lie.
+    let lastZoomFactor = tab.getZoomFactor()
+    const zoomHandler = () => {
+      if (tab.isDestroyed()) return
+      const newZoomFactor = tab.getZoomFactor()
+      if (newZoomFactor === lastZoomFactor) return
+      const oldZoomFactor = lastZoomFactor
+      lastZoomFactor = newZoomFactor
+      this.ctx.router.broadcastEvent('tabs.onZoomChange', {
+        tabId,
+        oldZoomFactor,
+        newZoomFactor,
+        zoomSettings: { mode: 'automatic', scope: 'per-origin', defaultZoomFactor: 1 },
+      })
+    }
+    tab.on('zoom-changed', zoomHandler)
+
     tab.once('destroyed', () => {
       updateEvents.forEach((eventName) => {
         tab.off(eventName as any, updateHandler)
@@ -112,6 +146,7 @@ export class TabsAPI {
         tab.off(eventName as any, navigationHandler)
       })
       tab.off('page-favicon-updated', faviconHandler)
+      tab.off('zoom-changed', zoomHandler)
 
       this.ctx.store.removeTab(tab)
       this.onRemoved(tabId)
@@ -273,6 +308,15 @@ export class TabsAPI {
 
   private query(event: ExtensionEvent, info: chrome.tabs.QueryInfo = {}) {
     const isSet = (value: any) => typeof value !== 'undefined'
+    /*
+      `currentWindow` and `lastFocusedWindow` were ignored, so `query({ active: true, currentWindow:
+      true })` — the single most common tabs call there is — answered one tab PER WINDOW. With an
+      extension's own login window registered as a window, a password manager asking for "the page
+      in front of the user" got two tabs and had to guess; `tabs[0]` happened to be right only while
+      the app's window was registered first.
+    */
+    const currentWindowId = this.currentWindowIdFor(event)
+    const lastFocusedWindowId = this.ctx.store.lastFocusedWindowId
 
     const filteredTabs = Array.from(this.ctx.store.tabs)
       .map(this.getTabDetails.bind(this))
@@ -286,8 +330,13 @@ export class TabsAPI {
         if (isSet(info.discarded) && info.discarded !== tab.discarded) return false
         if (isSet(info.autoDiscardable) && info.autoDiscardable !== tab.autoDiscardable)
           return false
-        // if (isSet(info.currentWindow)) return false
-        // if (isSet(info.lastFocusedWindow)) return false
+        if (isSet(info.currentWindow) && info.currentWindow !== (tab.windowId === currentWindowId))
+          return false
+        if (
+          isSet(info.lastFocusedWindow) &&
+          info.lastFocusedWindow !== (tab.windowId === lastFocusedWindowId)
+        )
+          return false
         if (isSet(info.frozen) && info.frozen !== tab.frozen) return false
         if (isSet(info.groupId) && info.groupId !== tab.groupId) return false
         if (isSet(info.status) && info.status !== tab.status) return false
@@ -422,6 +471,47 @@ export class TabsAPI {
     return this.createTabDetails(tab)
   }
 
+  /** A new tab on the same URL, next to the original, as Chrome's `tabs.duplicate`. */
+  private async duplicate(event: ExtensionEvent, tabId: number) {
+    const tab = this.ctx.store.getTabById(tabId)
+    if (!tab) throw new Error(`No tab with id: ${tabId}.`)
+    const win = this.ctx.store.tabToWindow.get(tab)
+    return this.create(event, {
+      url: tab.getURL(),
+      windowId: win && !win.isDestroyed() ? win.id : undefined,
+      active: true,
+    })
+  }
+
+  /*
+    `tabs.highlight` selects tabs by INDEX within a window, and the embedder's tabs have no order of
+    their own: the index is the one `query()` reports, which is the registration order of the
+    window's tabs. Chrome makes the first highlighted tab active, and that is the part an extension
+    calling this from a tab list depends on ("show me this tab").
+  */
+  private async highlight(event: ExtensionEvent, info: chrome.tabs.HighlightInfo) {
+    const windowId =
+      typeof info?.windowId === 'number' && info.windowId !== TabsAPI.WINDOW_ID_CURRENT
+        ? info.windowId
+        : this.currentWindowIdFor(event)
+    const win = typeof windowId === 'number' ? this.ctx.store.getWindowById(windowId) : undefined
+    if (!win) throw new Error(`No window with id: ${windowId}.`)
+    const indexes = Array.isArray(info?.tabs) ? info.tabs : [info?.tabs]
+    const first = indexes.find((index) => typeof index === 'number')
+    const tabs = Array.from(this.ctx.store.tabs).filter(
+      (tab) => !tab.isDestroyed() && this.ctx.store.tabToWindow.get(tab) === win,
+    )
+    const tab = typeof first === 'number' ? tabs[first] : undefined
+    if (!tab) throw new Error('No tab at the given index.')
+    this.onActivated(tab.id)
+    const details: Partial<chrome.windows.Window> = {
+      id: win.id,
+      focused: win.isFocused(),
+      tabs: tabs.map(this.getTabDetails.bind(this)) as chrome.tabs.Tab[],
+    }
+    return details
+  }
+
   private remove(event: ExtensionEvent, id: number | number[]) {
     const ids = Array.isArray(id) ? id : [id]
 
@@ -539,6 +629,12 @@ export class TabsAPI {
 
     this.ctx.router.broadcastEvent('tabs.onActivated', {
       tabId,
+      windowId: win?.id,
+    })
+    // Chrome highlights the active tab, so an activation changes the highlighted set too and
+    // onHighlighted follows onActivated with the new set: here, the one active tab.
+    this.ctx.router.broadcastEvent('tabs.onHighlighted', {
+      tabIds: [tabId],
       windowId: win?.id,
     })
   }

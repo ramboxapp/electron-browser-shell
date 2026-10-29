@@ -1,5 +1,5 @@
 import { expect } from 'chai'
-import { app, webContents } from 'electron'
+import { app, BrowserWindow, webContents } from 'electron'
 import { emittedOnce } from './events-helpers'
 
 import { useExtensionBrowser, useServer } from './hooks'
@@ -128,5 +128,98 @@ describe('chrome.windows', () => {
       browser.crx.exec('windows.remove')
       await closedPromise
     })
+  })
+
+  /*
+    update() honoured `state` and nothing else. Extensions bring their own window forward with
+    `update(id, { focused: true })` and size it with the bounds, and both were silently ignored.
+  */
+  describe('update()', () => {
+    it('applies the bounds', async () => {
+      const windowId = browser.window.id
+      const result = await browser.crx.exec('windows.update', windowId, {
+        left: 40,
+        top: 50,
+        width: 640,
+        height: 480,
+      })
+      expect(result.width).to.equal(640)
+      expect(result.height).to.equal(480)
+      const bounds = browser.window.getBounds()
+      expect(bounds.width).to.equal(640)
+      expect(bounds.height).to.equal(480)
+      expect(bounds.x).to.equal(40)
+      expect(bounds.y).to.equal(50)
+    })
+
+    it('makes the window the last focused one with focused: true', async () => {
+      const other = new BrowserWindow({
+        show: false,
+        webPreferences: { session: browser.session, nodeIntegration: false, contextIsolation: true },
+      })
+      browser.extensions.addTab(other.webContents, other)
+      try {
+        await browser.crx.exec('windows.update', other.id, { focused: true })
+        const current = await browser.crx.exec('windows.getLastFocused')
+        expect(current.id).to.equal(other.id)
+      } finally {
+        other.destroy()
+      }
+    })
+
+    it('answers nothing for a window that is gone', async () => {
+      const result = await browser.crx.exec('windows.update', 987654, { focused: true })
+      expect(result).to.equal(null)
+    })
+  })
+})
+
+/*
+  create() handed the embedder the URL untouched. Chrome resolves a relative URL against the
+  extension — `windows.create({ url: 'login.html' })` is the documented way to open an extension
+  page — and refuses chrome: and file:; here a relative one was unloadable and the rest were let
+  through.
+*/
+describe('chrome.windows.create()', () => {
+  const server = useServer()
+  const created: Electron.BrowserWindow[] = []
+  const opened: string[] = []
+  const browser = useExtensionBrowser({
+    url: server.getUrl,
+    extensionName: 'rpc-mv3',
+    async createWindow(details) {
+      opened.push(String(details.url))
+      const win = new BrowserWindow({
+        show: false,
+        webPreferences: { session: browser.session, nodeIntegration: false, contextIsolation: true },
+      })
+      created.push(win)
+      await win.loadURL(String(details.url))
+      return win
+    },
+  })
+
+  afterEach(() => {
+    for (const win of created.splice(0)) if (!win.isDestroyed()) win.destroy()
+    opened.length = 0
+  })
+
+  it('resolves a relative url against the extension', async () => {
+    const result = await browser.crx.exec('windows.create', { url: 'offscreen.html' })
+    expect(result).to.be.an('object')
+    expect(opened).to.deep.equal([`chrome-extension://${browser.extension.id}/offscreen.html`])
+  })
+
+  it('opens the first url of a list', async () => {
+    const url = server.getUrl()
+    await browser.crx.exec('windows.create', { url: [url, `${url}second`] })
+    expect(opened).to.deep.equal([url])
+  })
+
+  it('refuses a chrome: url', async () => {
+    // With a callback the fixture replies what the callback got: nothing, as the call failed.
+    const result = await browser.crx.exec('windows.create', { url: 'chrome://settings' })
+    expect(result).to.equal(null)
+    expect(opened).to.deep.equal([])
   })
 })

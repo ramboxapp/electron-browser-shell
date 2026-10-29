@@ -24,6 +24,29 @@ export const injectExtensionAPIs = () => {
     }
   }
 
+  /*
+    The message of an error the main process handler threw, in the words the handler used.
+
+    ipcRenderer.invoke wraps a rejection as "Error invoking remote method 'crx-msg': Error: <message>",
+    and that wrapper is what an extension would otherwise read in `runtime.lastError` — or match
+    against, since extensions compare lastError messages to Chrome's own wording.
+  */
+  const invokeErrorMessage = (error: unknown): string => {
+    const raw = error instanceof Error ? error.message : String(error)
+    return raw.replace(/^Error invoking remote method '[^']*': /, '').replace(/^Error: /, '')
+  }
+
+  /*
+    Rejects with the handler's error, and never calls a callback itself.
+
+    This used to swallow every error of the main process (`console.error`, then resolve undefined),
+    so an extension could not tell a failed call from one that answered nothing: the promise form
+    resolved undefined where Chrome rejects, and the callback form ran with `runtime.lastError`
+    unset where Chrome sets it. The callback — a function of the main world — is handled by the
+    main-world wrapper (see `invokeExtension` in mainWorldScript), which is the only place that can
+    set `runtime.lastError` for the duration of the call, as Chrome does. A trailing function is
+    still popped here for the few internal callers that pass one.
+  */
   const invokeExtension = async function (
     extensionId: string,
     fnName: string,
@@ -54,9 +77,11 @@ export const injectExtensionAPIs = () => {
     try {
       result = await ipcRenderer.invoke('crx-msg', extensionId, fnName, ...args)
     } catch (e) {
-      // TODO: Set chrome.runtime.lastError?
-      console.error(e)
-      result = undefined
+      const message = invokeErrorMessage(e)
+      if (process.env.NODE_ENV === 'development') {
+        console.log(fnName, '(error)', message)
+      }
+      throw new Error(message)
     }
 
     if (process.env.NODE_ENV === 'development') {
@@ -81,7 +106,6 @@ export const injectExtensionAPIs = () => {
     const connectionId = (contextBridge as any).executeInMainWorld({
       func: () => crypto.randomUUID(),
     })
-    invokeExtension(extensionId, 'runtime.connectNative', {}, connectionId, application)
     const onMessage = (_event: Electron.IpcRendererEvent, message: any) => {
       receive(message)
     }
@@ -91,6 +115,14 @@ export const injectExtensionAPIs = () => {
       ipcRenderer.off(`crx-native-msg-${connectionId}`, onMessage)
       disconnect(typeof reason === 'string' ? reason : undefined)
     })
+    // A connect the main process refuses (no nativeMessaging permission, say) ends the port the way
+    // a host that could not start does: onDisconnect with the refusal as lastError.
+    invokeExtension(extensionId, 'runtime.connectNative', {}, connectionId, application).catch(
+      (error: unknown) => {
+        ipcRenderer.off(`crx-native-msg-${connectionId}`, onMessage)
+        disconnect(invokeErrorMessage(error))
+      },
+    )
     const send = (message: any) => {
       ipcRenderer.send(`crx-native-msg-${connectionId}`, message)
     }
@@ -125,7 +157,13 @@ export const injectExtensionAPIs = () => {
     ipcRenderer.on(`crx-websocket-message-${connectionId}`, onMessage)
     ipcRenderer.on(`crx-websocket-close-${connectionId}`, onClose)
     ipcRenderer.on(`crx-websocket-error-${connectionId}`, onError)
-    invokeExtension(extensionId, 'websocket.connect', {}, connectionId, url, protocols)
+    // A connect the main process refuses fails the socket like a network error would.
+    invokeExtension(extensionId, 'websocket.connect', {}, connectionId, url, protocols).catch(
+      () => {
+        callbacks.onError()
+        callbacks.onClose({ code: 1006, reason: '', wasClean: false })
+      },
+    )
     // Disposer removes the per-connection listeners once the socket closes.
     return () => {
       ipcRenderer.off(`crx-websocket-open-${connectionId}`, onOpen)
@@ -174,10 +212,56 @@ export const injectExtensionAPIs = () => {
     const manifest: chrome.runtime.Manifest =
       (extensionId && chrome.runtime.getManifest?.()) || ({} as any)
 
+    /*
+      What `chrome.runtime.lastError` reads while a callback this file runs itself is running.
+
+      Chromium sets lastError on its own runtime object, for its own callbacks only. A callback the
+      preload invokes — for an API the main process implements, or for a port implemented here in
+      JavaScript (NativePort) — never goes through that path. The runtime namespace's `lastError`
+      getter reads this first and Chromium's value otherwise. Declared before anything that calls
+      into the main process, so every wrapper below can use it.
+    */
+    let injectedLastError: { message: string } | undefined
+    const withLastError = (message: string, dispatch: () => void) => {
+      const previous = injectedLastError
+      injectedLastError = { message }
+      try {
+        dispatch()
+      } finally {
+        injectedLastError = previous
+      }
+    }
+    // A `lastError` that reads through on every access, non-enumerable like Chrome's.
+    const defineLastError = <T extends object>(target: T, read: () => unknown): T =>
+      Object.defineProperty(target, 'lastError', {
+        get: read,
+        enumerable: false,
+        configurable: true,
+      })
+
+    /*
+      An API method backed by the main process, answering the way Chrome's do.
+
+      With a callback: the callback runs with the result, or — when the main process failed the
+      call — with no result and `chrome.runtime.lastError` set for its duration, and the method
+      returns nothing. Without one: a promise that resolves with the result or rejects with the
+      error. Errors used to vanish in the isolated world (every failed call read as a success that
+      answered undefined); an extension that asks `windows.create` for a URL it may not open, or
+      `offscreen.createDocument` twice, now learns it the way it does in Chrome.
+    */
     const invokeExtension =
       (fnName: string, opts: ExtensionMessageOptions = {}) =>
-      (...args: any[]) =>
-        electron.invokeExtension(extensionId, fnName, opts, ...args)
+      (...args: any[]) => {
+        const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+        const promise: Promise<any> = electron.invokeExtension(extensionId, fnName, opts, ...args)
+        if (!callback) return promise
+        promise.then(
+          (result) => callback(result),
+          (error) => withLastError(errorMessage(error), () => callback()),
+        )
+      }
+    const errorMessage = (error: unknown): string =>
+      error instanceof Error ? error.message : String(error)
 
     function imageData2base64(imageData: ImageData) {
       const canvas = document.createElement('canvas')
@@ -310,6 +394,7 @@ export const injectExtensionAPIs = () => {
         addListener: () => {},
         removeListener: () => {},
         hasListener: () => false,
+        hasListeners: () => false,
       }
     }
 
@@ -331,34 +416,15 @@ export const injectExtensionAPIs = () => {
           this.listeners.splice(index, 1)
         }
       }
-    }
-
-    /*
-      What `chrome.runtime.lastError` reads while a listener this file dispatches itself is running.
-
-      Chromium sets lastError on its own runtime object, for its own callbacks only. A port this
-      preload implements in JavaScript (NativePort) never goes through that path, so a native port
-      that died reported no error at all — where Chrome reports one on every disconnect the
-      extension did not ask for. The runtime namespace's `lastError` getter reads this first and
-      Chromium's value otherwise.
-    */
-    let injectedLastError: { message: string } | undefined
-    const withLastError = (message: string, dispatch: () => void) => {
-      const previous = injectedLastError
-      injectedLastError = { message }
-      try {
-        dispatch()
-      } finally {
-        injectedLastError = previous
+      // Chrome's events answer these two; an extension that guards its registration with
+      // hasListener() got a TypeError here.
+      hasListener(callback: T): boolean {
+        return this.listeners.includes(callback)
+      }
+      hasListeners(): boolean {
+        return this.listeners.length > 0
       }
     }
-    // A `lastError` that reads through on every access, non-enumerable like Chrome's.
-    const defineLastError = <T extends object>(target: T, read: () => unknown): T =>
-      Object.defineProperty(target, 'lastError', {
-        get: read,
-        enumerable: false,
-        configurable: true,
-      })
 
     class NativePort implements chrome.runtime.Port {
       private connectionId: string = ''
@@ -393,9 +459,8 @@ export const injectExtensionAPIs = () => {
         calls onDisconnect with the port and lastError "Specified native messaging host not found.",
         and "Native host has exited." once a host that ran is gone. This used to call the listeners
         with no arguments and no lastError, so an extension could not tell a missing desktop app from
-        a clean close. The main process does not say why yet (`reason` is there for when it does), so
-        a port that never heard from its host is reported as the host not being found: the case of
-        every user without the vendor's desktop app, on every start.
+        a clean close. The main process says why (NativeMessagingHost: not found, forbidden, failed
+        to start, exited); the guess below is only for a disconnect that arrives without a reason.
       */
       _disconnect(reason?: string) {
         if (!this.connected) return
@@ -625,38 +690,75 @@ export const injectExtensionAPIs = () => {
       },
     }
 
+    /*
+      An ImageData as a PNG data URL, in a context with no `document`: a service worker. Chrome
+      accepts ImageData from a worker, and an extension that draws its own icon state (a blocker
+      counting what it blocked, a dark-mode toggle) does exactly that. `OffscreenCanvas` encodes it;
+      the result is what the main process already knows how to serve.
+    */
+    const imageDataToPngUrl = async (imageData: ImageData): Promise<string> => {
+      // `any`: the DOM lib this package compiles against predates OffscreenCanvas' 2d context typings.
+      const canvas: any = new (globalThis as any).OffscreenCanvas(imageData.width, imageData.height)
+      const ctx = canvas.getContext('2d')
+      if (!ctx) throw new Error('No 2d context for the icon')
+      ctx.putImageData(imageData, 0, 0)
+      const blob: Blob = await canvas.convertToBlob({ type: 'image/png' })
+      const bytes = new Uint8Array(await blob.arrayBuffer())
+      let binary = ''
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + 0x8000)))
+      }
+      return `data:image/png;base64,${btoa(binary)}`
+    }
+
+    /*
+      setIcon's `imageData`, in a shape the main process can serve: a data URL, or a size map of
+      them. In a page the canvas is synchronous; in a worker it is OffscreenCanvas and asynchronous,
+      which is why this returns a promise either way. Used to drop the image in MV3 with a warning,
+      so every extension that paints its icon from a worker kept the manifest's static one.
+    */
+    const serializeIconDetails = async (
+      details: chrome.action.TabIconDetails,
+    ): Promise<chrome.action.TabIconDetails> => {
+      const image = details?.imageData
+      if (!image) return details
+      const encode = (data: ImageData): Promise<string | null> =>
+        typeof document !== 'undefined'
+          ? Promise.resolve(imageData2base64(data))
+          : imageDataToPngUrl(data)
+      const isImageData = (value: unknown): value is ImageData =>
+        typeof ImageData !== 'undefined' && value instanceof ImageData
+      let imageData: any
+      if (isImageData(image)) {
+        imageData = await encode(image)
+      } else if (typeof image === 'object') {
+        imageData = {}
+        for (const [size, data] of Object.entries(image as Record<string, ImageData>)) {
+          if (isImageData(data)) imageData[size] = await encode(data)
+        }
+      }
+      return { ...details, imageData }
+    }
+
     const browserActionFactory = (base: DeepPartial<typeof globalThis.chrome.browserAction>) => {
+      const setIconInvoke = invokeExtension('browserAction.setIcon')
       const api = {
         ...base,
 
         setTitle: invokeExtension('browserAction.setTitle'),
         getTitle: invokeExtension('browserAction.getTitle'),
 
-        setIcon: invokeExtension('browserAction.setIcon', {
-          serialize: (details: chrome.action.TabIconDetails) => {
-            if (details.imageData) {
-              if (manifest.manifest_version === 3) {
-                // TODO(mv3): might need to use offscreen document to serialize
-                console.warn(
-                  'action.setIcon with imageData is not yet supported by electron-chrome-extensions',
-                )
-                details.imageData = undefined
-              } else if (details.imageData instanceof ImageData) {
-                details.imageData = imageData2base64(details.imageData) as any
-              } else {
-                details.imageData = Object.entries(details.imageData).reduce(
-                  (obj: any, pair: any[]) => {
-                    obj[pair[0]] = imageData2base64(pair[1])
-                    return obj
-                  },
-                  {},
-                )
-              }
-            }
-
-            return [details]
-          },
-        }),
+        setIcon: (details: chrome.action.TabIconDetails, callback?: () => void) => {
+          const promise = serializeIconDetails(details).then((serialized) =>
+            setIconInvoke(serialized),
+          )
+          if (typeof callback !== 'function') return promise
+          const done = callback
+          promise.then(
+            () => done(),
+            (error) => withLastError(errorMessage(error), () => done()),
+          )
+        },
 
         setPopup: invokeExtension('browserAction.setPopup'),
         getPopup: invokeExtension('browserAction.getPopup'),
@@ -823,8 +925,33 @@ export const injectExtensionAPIs = () => {
 
       extension: {
         factory: (base) => {
+          const inServiceWorker =
+            typeof (globalThis as any).ServiceWorkerGlobalScope !== 'undefined' &&
+            globalThis instanceof (globalThis as any).ServiceWorkerGlobalScope
+
+          /*
+            `getViews` was `() => []` everywhere. Chrome has no `getViews` in a service worker at all,
+            and in a page it lists the extension's views in the same process — the calling page
+            always among them. Other views live in other renderer processes here and a Window
+            cannot cross that boundary, so the honest part this can give is the caller itself, and
+            only when the filter could match it: a `type`, `tabId` or `windowId` filter asks
+            for something this context cannot vouch for, and answers [] as before.
+          */
+          const getViews = (fetchProperties?: chrome.extension.FetchProperties) => {
+            if (typeof (base as any)?.getViews === 'function') {
+              const native = (base as any).getViews(fetchProperties)
+              if (Array.isArray(native) && native.length > 0) return native
+            }
+            const filter: any = fetchProperties || {}
+            const narrowed =
+              filter.type !== undefined ||
+              filter.tabId !== undefined ||
+              (filter.windowId !== undefined && filter.windowId !== -2)
+            return narrowed ? [] : [globalThis]
+          }
+
           // The MV2 alias of runtime.lastError; read through for the same reason (see runtime below).
-          return defineLastError(
+          const api: any = defineLastError(
             {
               ...base,
               isAllowedFileSchemeAccess: invokeExtension('extension.isAllowedFileSchemeAccess', {
@@ -835,11 +962,12 @@ export const injectExtensionAPIs = () => {
                 noop: true,
                 defaultResponse: false,
               }),
-              // TODO: Add native implementation
-              getViews: () => [],
+              ...(inServiceWorker ? {} : { getViews }),
             },
             () => base?.lastError,
           )
+          if (inServiceWorker) delete api.getViews
+          return api
         },
       },
 
@@ -881,6 +1009,26 @@ export const injectExtensionAPIs = () => {
       identity: {
         shouldInject: () => !!(manifest.permissions as string[] | undefined)?.includes('identity'),
         factory: (base) => {
+          /*
+            The account half of chrome.identity, answered as Chrome answers them in a browser with no
+            Google account signed in: `getProfileUserInfo` gives empty strings, `getAuthToken` fails
+            with "The user is not signed in." (the message Chrome's own binding uses), the cache
+            calls succeed with nothing to clear, and `getAccounts` lists none. There is no account
+            to sign in here, so these are the honest answers — and far better than the methods not
+            existing, which made an enterprise agent die on `getAuthToken is not a function` at
+            worker start instead of taking its no-account path.
+          */
+          const notSignedIn = () => new Error('The user is not signed in.')
+          const fail =
+            (error: () => Error) =>
+            (...args: any[]) => {
+              const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+              if (callback) {
+                queueMicrotask(() => withLastError(error().message, () => callback()))
+                return
+              }
+              return Promise.reject(error())
+            }
           return {
             ...base,
             getRedirectURL: (path?: string) => {
@@ -888,6 +1036,74 @@ export const injectExtensionAPIs = () => {
               return `https://${extensionId}.chromiumapp.org/${cleanPath}`
             },
             launchWebAuthFlow: invokeExtension('identity.launchWebAuthFlow'),
+            getProfileUserInfo: localStub({ email: '', id: '' }),
+            getAuthToken: fail(notSignedIn),
+            removeCachedAuthToken: localStub(),
+            clearAllCachedAuthTokens: localStub(),
+            getAccounts: localStub([]),
+            onSignInChanged: new Event(),
+            // The enum getProfileUserInfo's details use; Endpoint Verification reads it at start.
+            AccountStatus: { ANY: 'ANY', SYNC: 'SYNC' } as any,
+          }
+        },
+      },
+
+      /*
+        chrome.gcm: the push channel of Google Cloud Messaging, which only Chrome's own GCM client
+        can provide. There is none here, so nothing can ever arrive and a registration cannot be
+        made — answered as Chrome answers a failed one (lastError / rejection, the error strings
+        are gcm's own). What matters is that the namespace exists: Endpoint Verification registers
+        `gcm.onMessage` at the top of its worker and died there, worker and all, on `undefined`.
+      */
+      gcm: {
+        shouldInject: () => !!(manifest.permissions as string[] | undefined)?.includes('gcm'),
+        factory: (base) => {
+          const unavailable =
+            (...args: any[]) => {
+              const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+              const error = new Error('UNKNOWN_ERROR')
+              if (callback) {
+                queueMicrotask(() => withLastError(error.message, () => callback()))
+                return
+              }
+              return Promise.reject(error)
+            }
+          return {
+            ...base,
+            MAX_MESSAGE_SIZE: 4096,
+            register: unavailable,
+            unregister: localStub(),
+            send: unavailable,
+            onMessage: new Event(),
+            onMessagesDeleted: new Event(),
+            onSendError: new Event(),
+          }
+        },
+      },
+
+      /*
+        chrome.proxy: Electron defines the namespace natively but registers none of its functions,
+        so every call ended in "Access to extension API denied." — NordVPN hits that three times per
+        boot and once per popup. The embedder owns the session's proxy (Rambox configures it per
+        profile), so the honest answer is a setting no extension controls: `get` reports the system
+        proxy as not controllable, `set` and `clear` take effect nowhere, and the extension's own
+        check of levelOfControl tells it so, instead of a denial it cannot interpret.
+      */
+      proxy: {
+        factory: (base) => {
+          const b: any = base || {}
+          return {
+            ...base,
+            settings: new ChromeSetting({ mode: 'system' }),
+            onProxyError: b.onProxyError || new Event(),
+            Mode: {
+              DIRECT: 'direct',
+              AUTO_DETECT: 'auto_detect',
+              PAC_SCRIPT: 'pac_script',
+              FIXED_SERVERS: 'fixed_servers',
+              SYSTEM: 'system',
+            },
+            Scheme: { HTTP: 'http', HTTPS: 'https', QUIC: 'quic', SOCKS4: 'socks4', SOCKS5: 'socks5' },
           }
         },
       },
@@ -930,12 +1146,25 @@ export const injectExtensionAPIs = () => {
 
       management: {
         factory: (base) => {
+          const b: any = base || {}
           return {
             ...base,
             // Electron's native implementation of getAll never resolves.
             get: invokeExtension('management.get'),
             getAll: invokeExtension('management.getAll'),
             getSelf: invokeExtension('management.getSelf'),
+            getPermissionWarningsById: invokeExtension('management.getPermissionWarningsById'),
+            getPermissionWarningsByManifest: invokeExtension(
+              'management.getPermissionWarningsByManifest',
+            ),
+            setEnabled: invokeExtension('management.setEnabled'),
+            uninstallSelf: invokeExtension('management.uninstallSelf'),
+            // Electron's binding carries onEnabled/onDisabled; the other two come from the library's
+            // own load and unload events. Nothing is ever disabled here, so those two never fire.
+            onInstalled: new ExtensionEvent('management.onInstalled'),
+            onUninstalled: new ExtensionEvent('management.onUninstalled'),
+            onEnabled: b.onEnabled || new ExtensionEvent('management.onEnabled'),
+            onDisabled: b.onDisabled || new ExtensionEvent('management.onDisabled'),
           }
         },
       },
@@ -1107,17 +1336,23 @@ export const injectExtensionAPIs = () => {
             const ask = () => {
               if (asked) return
               asked = true
-              invokeExtension('runtime.takeInstalledDetails')().then((details: any) => {
-                if (!details) return
-                for (const listener of Array.from(listeners)) {
-                  try {
-                    listener(details)
-                  } catch (error) {
-                    // An extension's own listener throwing must not stop the next one, as in Chrome.
-                    console.error(error)
+              // Promise form: no callback is passed, so the wrapper returns one.
+              ;(invokeExtension('runtime.takeInstalledDetails')() as Promise<any>).then(
+                (details: any) => {
+                  if (!details) return
+                  for (const listener of Array.from(listeners)) {
+                    try {
+                      listener(details)
+                    } catch (error) {
+                      // An extension's own listener throwing must not stop the next one, as in Chrome.
+                      console.error(error)
+                    }
                   }
-                }
-              })
+                },
+                // No record to read (a context the router cannot attribute): no event, not a rejection
+                // nobody handles.
+                () => undefined,
+              )
             }
             return {
               addListener: (callback: Function) => {
@@ -1164,6 +1399,61 @@ export const injectExtensionAPIs = () => {
                 }
                 electron.connectNative(extensionId, application, receive, disconnect, callback)
                 return port
+              },
+              /*
+                Electron's binding knows only the BACKGROUND context. Chromium also lists the
+                extension's offscreen document, popup and tabs, which the main process knows
+                (runtime.getDocumentContexts); both lists are joined here and filtered as Chromium
+                filters (every given key must match, any value within a key).
+              */
+              getContexts: (filter?: any, callback?: (contexts: any[]) => void) => {
+                if (typeof filter === 'function') {
+                  callback = filter
+                  filter = {}
+                }
+                filter = filter || {}
+                const native = (): Promise<any[]> =>
+                  new Promise((resolve) => {
+                    const nativeGetContexts = (base as any).getContexts
+                    if (typeof nativeGetContexts !== 'function') return resolve([])
+                    try {
+                      nativeGetContexts.call(
+                        base,
+                        { contextTypes: ['BACKGROUND'] },
+                        (list: any[]) => resolve(Array.isArray(list) ? list : []),
+                      )
+                    } catch {
+                      resolve([])
+                    }
+                  })
+                const keys: Array<[string, string]> = [
+                  ['contextTypes', 'contextType'],
+                  ['contextIds', 'contextId'],
+                  ['tabIds', 'tabId'],
+                  ['windowIds', 'windowId'],
+                  ['frameIds', 'frameId'],
+                  ['documentIds', 'documentId'],
+                  ['documentUrls', 'documentUrl'],
+                  ['documentOrigins', 'documentOrigin'],
+                ]
+                const matches = (context: any) =>
+                  keys.every(
+                    ([filterKey, field]) =>
+                      !Array.isArray(filter[filterKey]) ||
+                      filter[filterKey].includes(context[field]),
+                  ) &&
+                  (typeof filter.incognito !== 'boolean' || context.incognito === filter.incognito)
+                const promise = Promise.all([
+                  native(),
+                  invokeExtension('runtime.getDocumentContexts')() as Promise<any[]>,
+                ]).then(([background, documents]) =>
+                  [...background, ...(Array.isArray(documents) ? documents : [])].filter(matches),
+                )
+                if (typeof callback === 'function') {
+                  promise.then(callback)
+                  return
+                }
+                return promise
               },
               openOptionsPage: invokeExtension('runtime.openOptionsPage'),
               sendNativeMessage: invokeExtension('runtime.sendNativeMessage'),
@@ -1297,10 +1587,39 @@ export const injectExtensionAPIs = () => {
             onChanged: inertOnChanged,
           }
 
+          /*
+            `sync` aliases `local`, with the constants Chrome puts on the sync area. The alias used
+            to be the local object itself, whose constants are local's (QUOTA_BYTES alone), so
+            `sync.MAX_ITEMS` and `sync.QUOTA_BYTES_PER_ITEM` read undefined: LanguageTool 11.5.0
+            splits its dictionary into chunks sized by them, and a NaN chunk size keeps one chunk.
+            Methods stay bound to local, which is where the data lives.
+          */
+          const sync: any = {}
+          if (local) {
+            for (const key of Object.keys(local)) {
+              const member = (local as any)[key]
+              sync[key] = typeof member === 'function' ? member.bind(local) : member
+            }
+            // Members that live on the prototype of the native area, which Object.keys does not list.
+            for (const name of ['get', 'getBytesInUse', 'getKeys', 'set', 'remove', 'clear', 'setAccessLevel']) {
+              const member = (local as any)[name]
+              if (typeof member === 'function' && !sync[name]) sync[name] = member.bind(local)
+            }
+            if (!sync.onChanged && (local as any).onChanged) sync.onChanged = (local as any).onChanged
+          }
+          Object.assign(sync, {
+            QUOTA_BYTES: 102400,
+            QUOTA_BYTES_PER_ITEM: 8192,
+            MAX_ITEMS: 512,
+            MAX_WRITE_OPERATIONS_PER_HOUR: 1800,
+            MAX_WRITE_OPERATIONS_PER_MINUTE: 120,
+            MAX_SUSTAINED_WRITE_OPERATIONS_PER_MINUTE: 1000000,
+          })
+
           return {
             ...base,
             managed,
-            sync: local,
+            sync,
           }
         },
       },
@@ -1347,11 +1666,26 @@ export const injectExtensionAPIs = () => {
             remove: invokeExtension('tabs.remove'),
             goBack: invokeExtension('tabs.goBack'),
             goForward: invokeExtension('tabs.goForward'),
+            duplicate: invokeExtension('tabs.duplicate'),
+            highlight: invokeExtension('tabs.highlight'),
             onCreated: new ExtensionEvent('tabs.onCreated'),
             onRemoved: new ExtensionEvent('tabs.onRemoved'),
             onUpdated: new ExtensionEvent('tabs.onUpdated'),
             onActivated: new ExtensionEvent('tabs.onActivated'),
             onReplaced: new ExtensionEvent('tabs.onReplaced'),
+            /*
+              The rest of chrome.tabs' events. An extension registers these at the top of its worker
+              as a matter of course (a tab manager listens to all of them), and a namespace missing
+              one threw there and took the worker's registration with it. onHighlighted follows every
+              activation and onZoomChange the user's zoom; the other three describe a tab moving
+              between positions or windows, which the embedder's tabs never do, so they never fire —
+              which is the truth of the model, not a stub.
+            */
+            onHighlighted: new ExtensionEvent('tabs.onHighlighted'),
+            onZoomChange: new ExtensionEvent('tabs.onZoomChange'),
+            onMoved: new ExtensionEvent('tabs.onMoved'),
+            onDetached: new ExtensionEvent('tabs.onDetached'),
+            onAttached: new ExtensionEvent('tabs.onAttached'),
           }
           return api
         },

@@ -140,22 +140,55 @@ export class WindowsAPI {
     return Array.from(this.ctx.store.windows).map((win) => this.getWindowDetails(win, queryOptions))
   }
 
-  private async create(event: ExtensionEvent, details: chrome.windows.CreateData) {
+  /*
+    The URL a window opens with, the way Chrome reads it: one string or a list (the first entry is
+    what a single-tab embedder can show), relative to the extension's own origin, and never a
+    chrome:, javascript: or file: URL. The embedder's createWindow used to receive it untouched, so
+    `windows.create({ url: 'login.html' })` — relative, as Chrome allows — loaded a URL no window
+    could resolve.
+  */
+  private resolveCreateUrl(
+    details: chrome.windows.CreateData,
+    extension: Electron.Extension,
+  ): string | undefined {
+    const first = Array.isArray(details.url) ? details.url[0] : details.url
+    if (!first) return undefined
+    let url: string
+    try {
+      url = new URL(first, extension.url).href
+    } catch {
+      throw new Error(`Invalid url: "${first}".`)
+    }
+    if (/^(chrome|javascript|file):/i.test(url)) {
+      throw new Error(`Invalid url: "${first}".`)
+    }
+    return url
+  }
+
+  private async create(event: ExtensionEvent, details: chrome.windows.CreateData = {}) {
+    const url = this.resolveCreateUrl(details, event.extension)
     // See service-worker-wake.ts: the new window's page is likely to message
     // this extension shortly after loading, which can hang if its service
     // worker went idle — wake it before the consumer's createWindow() runs.
     await wakeExtensionServiceWorker(this.ctx.session, event.extension.id)
-    const win = await this.ctx.store.createWindow(event, details)
+    const win = await this.ctx.store.createWindow(event, { ...details, url })
     return this.getWindowDetails(win, { populate: true })
   }
 
+  /*
+    Everything `windows.update` can change, not only `state`. `focused: true` is the one extensions
+    lean on: a password manager that already has its unlock window open calls update({ focused:
+    true }) to bring it forward instead of opening a second one, and with this a no-op the window
+    stayed behind the app and looked like nothing happened. Bounds and `drawAttention` are the rest
+    of what Chrome honours here. A window the embedder has since destroyed answers nothing, as before.
+  */
   private async update(
     event: ExtensionEvent,
     windowId: number,
     updateProperties: chrome.windows.UpdateInfo = {},
   ) {
     const win = this.getWindowFromId(windowId)
-    if (!win) return
+    if (!win || win.isDestroyed()) return
 
     const props = updateProperties
 
@@ -167,13 +200,40 @@ export class WindowsAPI {
         case 'minimized':
           win.minimize()
           break
+        case 'fullscreen':
+          win.setFullScreen(true)
+          break
         case 'normal': {
+          if (win.isFullScreen()) win.setFullScreen(false)
           if (win.isMinimized() || win.isMaximized()) {
             win.restore()
           }
           break
         }
       }
+    }
+
+    const bounds: Partial<Electron.Rectangle> = {}
+    if (typeof props.left === 'number') bounds.x = Math.round(props.left)
+    if (typeof props.top === 'number') bounds.y = Math.round(props.top)
+    if (typeof props.width === 'number') bounds.width = Math.round(props.width)
+    if (typeof props.height === 'number') bounds.height = Math.round(props.height)
+    if (Object.keys(bounds).length > 0) {
+      win.setBounds({ ...win.getBounds(), ...bounds })
+    }
+
+    if (props.focused === true) {
+      if (win.isMinimized()) win.restore()
+      if (!win.isVisible()) win.show()
+      win.focus()
+      // The embedder's focus event follows, but the extension reads the answer first.
+      this.onFocusChanged(win.id)
+    } else if (props.focused === false) {
+      win.blur()
+    }
+
+    if (typeof props.drawAttention === 'boolean' && 'flashFrame' in win) {
+      ;(win as Electron.BrowserWindow).flashFrame(props.drawAttention)
     }
 
     return this.createWindowDetails(win)

@@ -18,6 +18,9 @@ export class IdentityAPI {
     })
   }
 
+  /** How long a non-interactive flow may take before it is deemed to need the user, as Chrome does. */
+  static readonly NON_INTERACTIVE_TIMEOUT_MS = 30_000
+
   private launchWebAuthFlow = (
     event: ExtensionEvent,
     details: WebAuthFlowDetails,
@@ -33,14 +36,33 @@ export class IdentityAPI {
       const win = new BrowserWindow({
         show: details.interactive !== false,
         webPreferences: {
+          /*
+            The extension's own session, not the default one. Chrome runs the flow in the profile, so
+            the provider sees the cookies the user already has there; in the default session every
+            flow started signed out, and a non-interactive refresh — which only works when the
+            provider recognises the session — could never succeed.
+          */
+          session: this.ctx.session,
           nodeIntegration: false,
           contextIsolation: true,
+          sandbox: true,
         },
       })
+
+      // A hidden flow that has not redirected needs the user: Chrome fails it with this message
+      // rather than leaving it pending for ever behind a window nobody can see.
+      const timer =
+        details.interactive === false
+          ? setTimeout(
+              () => settle(new Error('User interaction required.')),
+              IdentityAPI.NON_INTERACTIVE_TIMEOUT_MS,
+            )
+          : undefined
 
       const settle = (result: string | undefined | Error) => {
         if (settled) return
         settled = true
+        if (timer) clearTimeout(timer)
         if (!win.isDestroyed()) win.destroy()
         if (result instanceof Error) {
           reject(result)

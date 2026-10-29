@@ -1,4 +1,5 @@
 import { expect } from 'chai'
+import * as path from 'node:path'
 
 import { useExtensionBrowser, useServer } from './hooks'
 
@@ -22,5 +23,50 @@ describe('chrome.management', () => {
       expect(extensions).to.be.an('array')
       expect(extensions.map((info: any) => info.id)).to.include(browser.extension.id)
     })
+  })
+
+  describe('ExtensionInfo', () => {
+    /*
+      'normal' is what Chrome reports for a store install, and the packages loaded here are the
+      store's; 'development' is a developer's own checkout, and extensions switch debug behaviour
+      on for it that a user never sees in Chrome.
+    */
+    it('reports a store install, with its urls', async () => {
+      const info = await browser.crx.exec('management.getSelf')
+      expect(info.installType).to.equal('normal')
+      expect(info.enabled).to.equal(true)
+      expect(info.optionsUrl).to.equal('')
+    })
+  })
+})
+
+describe('chrome.management events', () => {
+  const server = useServer()
+  const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc-mv3' })
+
+  it('are all present in the worker', async () => {
+    const shapes = await browser.crx.raw({ type: 'event-shapes' })
+    for (const [name, shape] of Object.entries<any>(shapes.management)) {
+      expect(shape.addListener, `management.${name}.addListener`).to.equal('function')
+    }
+  })
+
+  it('fires onInstalled when another extension loads, and onUninstalled when it unloads', async () => {
+    // The worker boots lazily: make sure it is up and listening before the other extension loads.
+    await browser.crx.raw({ type: 'content-script-ping' })
+    const installed = browser.crx.eventOnce('management.onInstalled')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    const other = await browser.session.extensions.loadExtension(
+      path.join(__dirname, 'fixtures', 'chrome-browserAction-popup'),
+    )
+    const [info] = await installed
+    expect(info.id).to.equal(other.id)
+    expect(info.name).to.equal('chrome-browserAction-popup')
+
+    const uninstalled = browser.crx.eventOnce('management.onUninstalled')
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    browser.session.extensions.removeExtension(other.id)
+    const [removedId] = await uninstalled
+    expect(removedId).to.equal(other.id)
   })
 })

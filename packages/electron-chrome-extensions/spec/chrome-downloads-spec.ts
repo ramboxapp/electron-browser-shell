@@ -68,4 +68,38 @@ describe('chrome.downloads', () => {
       expect(results).to.be.empty
     })
   })
+
+  /*
+    A filename is relative to the downloads folder and must stay in it. It was joined as given, so
+    `../` walked out of the folder and an absolute path went wherever it pointed. Chrome refuses both
+    with "Invalid filename", before anything starts.
+  */
+  describe('download() filename', () => {
+    const attempt = async (filename: string) => {
+      const before = await browser.crx.exec('downloads.search', {})
+      const result = await browser.crx.exec('downloads.download', { url: server.getUrl(), filename })
+      const after = await browser.crx.exec('downloads.search', {})
+      return { result, started: after.length - before.length }
+    }
+
+    it('refuses a path that leaves the downloads folder', async () => {
+      const { result, started } = await attempt('../escaped.html')
+      expect(result, 'no download id').to.equal(null)
+      expect(started).to.equal(0)
+    })
+
+    it('refuses an absolute path', async () => {
+      // Forward slashes on Windows too: path.isAbsolute accepts them, and backslashes do not survive
+      // the string quoting the fixture's exec() goes through.
+      const absolute = process.platform === 'win32' ? 'C:/Windows/escaped.html' : '/tmp/escaped.html'
+      const { result, started } = await attempt(absolute)
+      expect(result).to.equal(null)
+      expect(started).to.equal(0)
+    })
+
+    it('accepts a name inside a subfolder', async () => {
+      const { result } = await attempt('sub/inside.html')
+      expect(result).to.be.a('number')
+    })
+  })
 })

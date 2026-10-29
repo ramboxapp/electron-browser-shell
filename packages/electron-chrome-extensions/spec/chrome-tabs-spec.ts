@@ -1,5 +1,5 @@
 import { expect } from 'chai'
-import { app, BrowserWindow } from 'electron'
+import { app, BrowserWindow, webContents } from 'electron'
 import { emittedOnce } from './events-helpers'
 
 import { useExtensionBrowser, useServer } from './hooks'
@@ -373,5 +373,107 @@ describe('chrome.tabs', () => {
       expect(tabId).to.equal(tab.id)
       expect(changeInfo.status).to.equal('loading')
     })
+  })
+
+  /*
+    query() ignored `currentWindow` and `lastFocusedWindow`, so `{ active: true, currentWindow: true }`
+    — the most common tabs call there is — answered one tab per window. An extension's own login
+    window counts as a window, so a password manager asking for the page in front of the user got
+    two tabs and had to guess.
+  */
+  describe('query() by window', () => {
+    const openSecondWindow = () => {
+      const other = new BrowserWindow({
+        show: false,
+        webPreferences: { session: browser.session, nodeIntegration: false, contextIsolation: true },
+      })
+      browser.extensions.addTab(other.webContents, other)
+      return other
+    }
+
+    it('currentWindow: true limits active tabs to the current window', async () => {
+      const other = openSecondWindow()
+      try {
+        // Both windows have an active tab; the last focused one is the first registered.
+        const all = await browser.crx.exec('tabs.query', { active: true })
+        expect(all).to.have.lengthOf(2)
+        const current = await browser.crx.exec('tabs.query', { active: true, currentWindow: true })
+        expect(current).to.have.lengthOf(1)
+        expect(current[0].windowId).to.equal(browser.window.id)
+        const others = await browser.crx.exec('tabs.query', { currentWindow: false })
+        expect(others.map((tab: any) => tab.windowId)).to.deep.equal([other.id])
+      } finally {
+        other.destroy()
+      }
+    })
+
+    it('lastFocusedWindow: true follows the focus', async () => {
+      const other = openSecondWindow()
+      try {
+        other.emit('focus')
+        const tabs = await browser.crx.exec('tabs.query', { lastFocusedWindow: true })
+        expect(tabs).to.have.lengthOf(1)
+        expect(tabs[0].windowId).to.equal(other.id)
+      } finally {
+        other.destroy()
+      }
+    })
+  })
+
+  describe('onHighlighted', () => {
+    it('fires with the activated tab, after onActivated', async () => {
+      // A second tab in the window the first one already made active: adding it activates it.
+      const tab: Electron.WebContents = (webContents as any).create({
+        sandbox: true,
+        session: browser.session,
+      })
+      try {
+        const highlighted = browser.crx.eventOnce('tabs.onHighlighted')
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        browser.extensions.addTab(tab, browser.window)
+        const [info] = await highlighted
+        expect(info.tabIds).to.deep.equal([tab.id])
+        expect(info.windowId).to.equal(browser.window.id)
+      } finally {
+        tab.close()
+      }
+    })
+  })
+
+  describe('duplicate()', () => {
+    it('opens a tab on the same url', async () => {
+      const tabId = browser.window.webContents.id
+      const result = await browser.crx.exec('tabs.duplicate', tabId)
+      expect(result).to.be.an('object')
+      expect(result.id).to.not.equal(tabId)
+      expect(result.url).to.equal(server.getUrl())
+      const tab = webContents.fromId(result.id)
+      expect(tab, 'the duplicate exists').to.not.equal(undefined)
+      tab?.close()
+    })
+  })
+
+  describe('update() with a file: url', () => {
+    it('is refused like chrome://', async () => {
+      const tabId = browser.webContents.id
+      const tabInfo = await browser.crx.exec('tabs.update', tabId, { url: 'file:///etc/passwd' })
+      expect(tabInfo).to.be.a('null')
+      expect(browser.webContents.getURL()).to.equal(server.getUrl())
+    })
+  })
+})
+
+// The MV3 fixture: these are what a service worker registers at its top level, where a missing
+// event is a TypeError that takes the worker's registration with it.
+describe('chrome.tabs events in a service worker', () => {
+  const server = useServer()
+  const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc-mv3' })
+
+  it('are all present', async () => {
+    const shapes = await browser.crx.raw({ type: 'event-shapes' })
+    for (const [name, shape] of Object.entries<any>(shapes.tabs)) {
+      expect(shape.addListener, `tabs.${name}.addListener`).to.equal('function')
+      expect(shape.hasListener, `tabs.${name}.hasListener`).to.equal('function')
+    }
   })
 })

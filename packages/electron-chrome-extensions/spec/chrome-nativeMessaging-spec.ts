@@ -38,6 +38,29 @@ if (process.platform !== 'linux') {
         const result = await browser.crx.exec('runtime.sendNativeMessage', hostApplication, value)
         expect(result).to.deep.equal(value)
       })
+
+      /*
+        The length prefix of the protocol counts bytes. Framing by `string.length` — UTF-16 code
+        units — truncated every message with a character outside ASCII, which is any vault entry
+        with an accent in it, and the host parsed a cut JSON or desynchronised on the leftover.
+      */
+      it('round-trips a message with multi-byte characters', async () => {
+        const value = { nombre: 'contraseña única — ñandú 🦜', items: ['café', '日本語'] }
+        const result = await browser.crx.exec('runtime.sendNativeMessage', hostApplication, value)
+        expect(result).to.deep.equal(value)
+      })
+
+      /*
+        A host answers through a pipe, which hands over 64 KB at a time: a reply larger than that
+        arrives in several 'data' chunks, and reading each chunk as a whole message threw on the
+        first one. A vault listing is far larger than 64 KB.
+      */
+      it('round-trips a message larger than a pipe chunk', async function () {
+        this.timeout(20e3)
+        const value = { blob: 'x'.repeat(300 * 1024), tail: randomUUID() }
+        const result = await browser.crx.exec('runtime.sendNativeMessage', hostApplication, value)
+        expect(result).to.deep.equal(value)
+      })
     })
   })
 }

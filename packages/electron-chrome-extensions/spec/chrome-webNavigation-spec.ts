@@ -1,5 +1,7 @@
 import { expect } from 'chai'
 import { ipcMain } from 'electron'
+import * as http from 'http'
+import { AddressInfo } from 'net'
 
 import { useExtensionBrowser, useServer } from './hooks'
 
@@ -85,6 +87,80 @@ describe('chrome.webNavigation frame details', () => {
         undefined,
         null,
       ])
+    }
+  })
+})
+
+/*
+  What webNavigation reports for a page with two iframes, one web and one of the extension itself.
+  Measured on 28/10/2026 against Edge 156 with Keeper: the extension's own iframe produces no
+  webNavigation event at all (a web iframe does), and a subframe's onCompleted arrives once, with
+  the subframe's URL. Here the extension frame produced onBeforeNavigate and onCompleted, and each
+  subframe's onCompleted came twice, the second time with the TAB's URL.
+*/
+describe('chrome.webNavigation subframe events', () => {
+  let server: http.Server
+  let base: string
+  before(async () => {
+    server = http.createServer((req, res) => {
+      res.writeHead(200, { 'Content-Type': 'text/html' })
+      res.end(
+        req.url?.startsWith('/child')
+          ? '<!DOCTYPE html><html><body>child</body></html>'
+          : '<!DOCTYPE html><html><body>parent</body></html>',
+      )
+    })
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', () => {
+        base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`
+        resolve()
+      }),
+    )
+  })
+  after(() => server.close())
+
+  const browser = useExtensionBrowser({ url: () => base, extensionName: 'rpc-mv3' })
+
+  it('reports a web subframe once, with its own URL, and nothing for an extension frame', async () => {
+    const router = (browser.extensions as any).ctx.router
+    const original = router.broadcastEvent
+    const events: { name: string; details: any }[] = []
+    router.broadcastEvent = function (name: string, ...args: any[]) {
+      if (name.startsWith('webNavigation.')) events.push({ name, details: args[0] })
+      return original.call(this, name, ...args)
+    }
+    try {
+      const childUrl = `${base}child`
+      const extensionUrl = `chrome-extension://${browser.extension.id}/page-script.js`
+      await browser.webContents.executeJavaScript(`new Promise((resolve) => {
+        let pending = 2
+        for (const src of [${JSON.stringify(childUrl)}, ${JSON.stringify(extensionUrl)}]) {
+          const frame = document.createElement('iframe')
+          frame.onload = () => { if (--pending === 0) resolve() }
+          frame.src = src
+          document.body.appendChild(frame)
+        }
+      })`)
+      // Let the main-process events that trail the frames' load land.
+      await new Promise((resolve) => setTimeout(resolve, 500))
+
+      const extensionEvents = events.filter((e) =>
+        String(e.details?.url || '').startsWith('chrome-extension://'),
+      )
+      expect(
+        extensionEvents.map((e) => e.name),
+        'events for the extension frame',
+      ).to.be.empty
+
+      const subframeCompleted = events.filter(
+        (e) => e.name === 'webNavigation.onCompleted' && e.details.frameId !== 0,
+      )
+      expect(
+        subframeCompleted.map((e) => e.details.url),
+        'onCompleted of the web subframe',
+      ).to.deep.equal([childUrl])
+    } finally {
+      router.broadcastEvent = original
     }
   })
 })
