@@ -112,10 +112,34 @@ async function startWorker() {
   }
 }
 
+// chrome.i18n as the content script's isolated world sees it: the one context the preload cannot
+// reach, so only the shim the locale patch leaves in the extension can localize it.
+function reportI18n() {
+  const g = (...args) => chrome.i18n.getMessage(...args)
+  const result = {
+    shim: typeof self.__crxStorageShimRan === 'undefined' ? 'absent' : self.__crxStorageShimRan,
+    uiLanguage: chrome.i18n.getUILanguage(),
+    greeting: g('greeting', ['Ana', '3']),
+    tagline: g('tagline'),
+    onlyInEn: g('only_in_en'),
+    price: g('price'),
+    extensionId: g('@@extension_id'),
+    unknown: g('no_such_message'),
+  }
+  chrome.i18n.getAcceptLanguages((languages) => {
+    result.acceptLanguages = languages
+    sendIpc('success', result)
+  })
+}
+
 window.addEventListener('message', (event) => {
   const data = event.data
   if (data && data.type === 'content-script-storage') {
     reportStorage()
+    return
+  }
+  if (data && data.type === 'content-script-i18n') {
+    reportI18n()
     return
   }
   if (data && data.type === 'content-script-worker') {

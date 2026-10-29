@@ -1,0 +1,14 @@
+{
+  "greeting": {
+    "message": "Hello $NAME$, you have $COUNT$ new messages",
+    "placeholders": {
+      "name": { "content": "$1", "example": "Ana" },
+      "count": { "content": "$2" }
+    }
+  },
+  "only_in_en": { "message": "English only" },
+  "tagline": { "message": "From en" },
+  "price": { "message": "Costs $$5" },
+  "positional": { "message": "First $1, second $2" },
+  "with_lt": { "message": "a < b" }
+}

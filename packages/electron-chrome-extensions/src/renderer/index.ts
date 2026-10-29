@@ -1,5 +1,6 @@
 import { ipcRenderer, contextBridge, webFrame } from 'electron'
 import { addExtensionListener, removeExtensionListener, hasExtensionListeners } from './event'
+import { formatExtensionMessage, CrxI18nPayload, CrxI18nState } from '../shared/i18n-format'
 
 export const injectExtensionAPIs = () => {
   interface ExtensionMessageOptions {
@@ -184,6 +185,20 @@ export const injectExtensionAPIs = () => {
     invokeExtension(extensionId, 'websocket.close', {}, connectionId, code, reason)
   }
 
+  /*
+    The message bundle the locale patch left in the manifest, kept on this side of the bridge so
+    `getMessage` — a synchronous API an extension calls hundreds of times — crosses it with a name
+    and its substitutions, not with the whole bundle every call. Set once per context, from the
+    main world, which is where the manifest is read.
+  */
+  let i18nState: CrxI18nState | undefined
+  const i18nInit = (extensionId: string, payload: CrxI18nPayload) => {
+    if (!payload || !payload.messages) return
+    i18nState = { locale: payload.locale, messages: payload.messages, extensionId }
+  }
+  const i18nGetMessage = (name: unknown, substitutions?: unknown, options?: { escapeLt?: boolean }) =>
+    i18nState ? formatExtensionMessage(i18nState, name, substitutions, options) : ''
+
   const electronContext = {
     invokeExtension,
     addExtensionListener,
@@ -194,6 +209,8 @@ export const injectExtensionAPIs = () => {
     connectWebSocket,
     sendWebSocketFrame,
     closeWebSocket,
+    i18nInit,
+    i18nGetMessage,
   }
 
   // Function body to run in the main world.
@@ -1109,8 +1126,35 @@ export const injectExtensionAPIs = () => {
       },
 
       i18n: {
-        shouldInject: () => manifest.manifest_version === 3,
         factory: (base) => {
+          /*
+            The host application's language, when the locale patch resolved a bundle for it (see
+            browser/patch/locale-patch.ts: Electron's own getMessage only ever answers in the
+            extension's default locale). The bundle rides in the manifest under `crx_i18n` because
+            getManifest() is synchronous in every context, getMessage is a synchronous API, and a
+            worker calls it from its first lines. Only the locale-dependent methods are replaced;
+            `detectLanguage` and whatever else Electron provides stay native.
+          */
+          const payload: CrxI18nPayload | undefined = (manifest as any)?.crx_i18n
+          if (payload && payload.messages && extensionId) {
+            electron.i18nInit(extensionId, payload)
+            const languages = payload.locale === 'en-US' ? ['en-US'] : [payload.locale, 'en-US']
+            return {
+              ...base,
+              getMessage: (name: string, substitutions?: any, options?: any) =>
+                electron.i18nGetMessage(name, substitutions, options),
+              getUILanguage: () => payload.locale,
+              getAcceptLanguages: (callback?: any) => {
+                const results = languages.slice()
+                if (typeof callback === 'function') {
+                  queueMicrotask(() => callback(results))
+                  return
+                }
+                return Promise.resolve(results)
+              },
+            }
+          }
+
           // Electron configuration prevented this API from being available.
           // https://github.com/electron/electron/pull/45031
           if (base.getMessage) {

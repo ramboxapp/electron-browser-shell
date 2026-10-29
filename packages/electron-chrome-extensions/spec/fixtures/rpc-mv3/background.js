@@ -14,6 +14,22 @@ self.__crxImportResult = (() => {
   }
 })()
 
+/*
+  webRequest listeners registered at the worker's top level, the way every real extension registers
+  them (Chrome requires it for a service worker to be woken for them). Which events reach an MV3
+  worker is the question the webRequest spec asks under each Electron.
+*/
+const webRequestSeen = { onBeforeRequest: [], onHeadersReceived: [], onCompleted: [], errors: [] }
+for (const name of ['onBeforeRequest', 'onHeadersReceived', 'onCompleted']) {
+  try {
+    chrome.webRequest[name].addListener((details) => {
+      webRequestSeen[name].push(details.url)
+    }, { urls: ['<all_urls>'] })
+  } catch (error) {
+    webRequestSeen.errors.push(name + ': ' + ((error && error.message) || error))
+  }
+}
+
 const sendIpc = ({ tabId, name }) => {
   chrome.tabs.sendMessage(tabId, { type: 'send-ipc', args: [name] })
 }
@@ -479,6 +495,45 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
             typeof chrome.privacy.services.passwordSavingEnabled.onChange.hasListeners,
         }
         reply(out)
+      })()
+      return true
+    }
+
+    // What the top-level webRequest listeners of this worker have seen so far.
+    case 'webrequest-mv3-results': {
+      reply(webRequestSeen)
+      break
+    }
+
+    // chrome.i18n from the worker: what getMessage answers once the host app's language is known.
+    case 'i18n-shapes': {
+      ;(async () => {
+        const g = (...args) => chrome.i18n.getMessage(...args)
+        reply({
+          uiLanguage: chrome.i18n.getUILanguage(),
+          acceptLanguages: await chrome.i18n.getAcceptLanguages(),
+          greeting: g('greeting', ['Ana', '3']),
+          greetingUpper: g('GREETING', ['Ana', '3']),
+          greetingOneSub: g('greeting', 'Ana'),
+          tagline: g('tagline'),
+          onlyInEn: g('only_in_en'),
+          price: g('price'),
+          positional: g('positional', ['a', 'b']),
+          withLt: g('with_lt'),
+          withLtEscaped: g('with_lt', [], { escapeLt: true }),
+          unknown: g('no_such_message'),
+          extensionId: g('@@extension_id'),
+          uiLocale: g('@@ui_locale'),
+          bidiDir: g('@@bidi_dir'),
+          tooMany: (() => {
+            try {
+              g('positional', ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'])
+              return 'no throw'
+            } catch (error) {
+              return 'threw: ' + error.message
+            }
+          })(),
+        })
       })()
       return true
     }

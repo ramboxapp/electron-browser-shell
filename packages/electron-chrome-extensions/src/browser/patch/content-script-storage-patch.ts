@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import debug from 'debug'
+import { CRX_I18N_KEY, formatExtensionMessage } from '../../shared/i18n-format'
 
 const d = debug('electron-chrome-extensions:content-script-storage-patch')
 
@@ -128,6 +129,45 @@ const SHIM_SOURCE = `/* electron-chrome-extensions: the APIs a content script is
   if (typeof chrome.dom === 'undefined' && !defineOn(chrome, 'dom', dom)) failed.push('dom')
   if (typeof chrome.extension === 'undefined' && !defineOn(chrome, 'extension', extension))
     failed.push('extension')
+
+  /*
+    chrome.i18n in the host application's language. Electron's own getMessage answers in the
+    extension's default locale whatever the app's language is (see locale-patch.ts); the locale
+    patch resolves the right bundle and leaves it in the manifest, the one thing a content script
+    can read synchronously, and this replaces the three locale-dependent methods with ones that use
+    it. An extension the patch found no bundle for keeps Electron's.
+  */
+  var i18nPayload = null
+  try {
+    i18nPayload = chrome.runtime && chrome.runtime.getManifest && chrome.runtime.getManifest()['__CRX_I18N_KEY__']
+  } catch (error) {
+    i18nPayload = null
+  }
+  if (i18nPayload && i18nPayload.messages && chrome.i18n) {
+    var formatMessage = __FORMAT_EXTENSION_MESSAGE__
+    var i18nState = {
+      locale: i18nPayload.locale,
+      messages: i18nPayload.messages,
+      extensionId: chrome.runtime.id,
+    }
+    var acceptLanguages = i18nPayload.locale === 'en-US' ? ['en-US'] : [i18nPayload.locale, 'en-US']
+    var i18nOk =
+      defineOn(chrome.i18n, 'getMessage', function (name, substitutions, options) {
+        return formatMessage(i18nState, name, substitutions, options)
+      }) &&
+      defineOn(chrome.i18n, 'getUILanguage', function () {
+        return i18nPayload.locale
+      }) &&
+      defineOn(chrome.i18n, 'getAcceptLanguages', function (callback) {
+        var languages = acceptLanguages.slice()
+        if (typeof callback === 'function') {
+          Promise.resolve().then(function () { callback(languages) })
+          return undefined
+        }
+        return Promise.resolve(languages)
+      })
+    if (!i18nOk) failed.push('i18n')
+  }
   // A failed definition is otherwise indistinguishable from the shim never having run at all.
   self.__crxStorageShimRan = failed.length === 0 ? 'ok' : 'failed:' + failed.join(',')
   if (failed.length) {
@@ -135,6 +175,10 @@ const SHIM_SOURCE = `/* electron-chrome-extensions: the APIs a content script is
   }
 })()
 `
+  // The formatter is one self-contained function, written to be embedded this way (see
+  // shared/i18n-format.ts); the key is the one the locale patch writes.
+  .replace('__FORMAT_EXTENSION_MESSAGE__', formatExtensionMessage.toString())
+  .replace('__CRX_I18N_KEY__', CRX_I18N_KEY)
 
 /**
  * Makes `chrome.storage.sync` and `chrome.storage.managed` usable from an extension's content

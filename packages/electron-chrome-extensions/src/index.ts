@@ -15,3 +15,9 @@ export {
   patchContentScriptStorage,
   CONTENT_SCRIPT_STORAGE_SHIM_FILE,
 } from './browser/patch/content-script-storage-patch'
+export {
+  patchExtensionLocale,
+  localeCandidates,
+  resolveExtensionMessages,
+} from './browser/patch/locale-patch'
+export { formatExtensionMessage, CRX_I18N_KEY } from './shared/i18n-format'

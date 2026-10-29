@@ -1,0 +1,10 @@
+{
+  "greeting": {
+    "message": "Hola $NAME$, tenés $COUNT$ mensajes nuevos",
+    "placeholders": {
+      "name": { "content": "$1" },
+      "count": { "content": "$2" }
+    }
+  },
+  "tagline": { "message": "From es" }
+}
