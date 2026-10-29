@@ -196,8 +196,11 @@ export const injectExtensionAPIs = () => {
     if (!payload || !payload.messages) return
     i18nState = { locale: payload.locale, messages: payload.messages, extensionId }
   }
-  const i18nGetMessage = (name: unknown, substitutions?: unknown, options?: { escapeLt?: boolean }) =>
-    i18nState ? formatExtensionMessage(i18nState, name, substitutions, options) : ''
+  const i18nGetMessage = (
+    name: unknown,
+    substitutions?: unknown,
+    options?: { escapeLt?: boolean },
+  ) => (i18nState ? formatExtensionMessage(i18nState, name, substitutions, options) : '')
 
   const electronContext = {
     invokeExtension,
@@ -1075,16 +1078,15 @@ export const injectExtensionAPIs = () => {
       gcm: {
         shouldInject: () => !!(manifest.permissions as string[] | undefined)?.includes('gcm'),
         factory: (base) => {
-          const unavailable =
-            (...args: any[]) => {
-              const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
-              const error = new Error('UNKNOWN_ERROR')
-              if (callback) {
-                queueMicrotask(() => withLastError(error.message, () => callback()))
-                return
-              }
-              return Promise.reject(error)
+          const unavailable = (...args: any[]) => {
+            const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+            const error = new Error('UNKNOWN_ERROR')
+            if (callback) {
+              queueMicrotask(() => withLastError(error.message, () => callback()))
+              return
             }
+            return Promise.reject(error)
+          }
           return {
             ...base,
             MAX_MESSAGE_SIZE: 4096,
@@ -1120,7 +1122,13 @@ export const injectExtensionAPIs = () => {
               FIXED_SERVERS: 'fixed_servers',
               SYSTEM: 'system',
             },
-            Scheme: { HTTP: 'http', HTTPS: 'https', QUIC: 'quic', SOCKS4: 'socks4', SOCKS5: 'socks5' },
+            Scheme: {
+              HTTP: 'http',
+              HTTPS: 'https',
+              QUIC: 'quic',
+              SOCKS4: 'socks4',
+              SOCKS5: 'socks5',
+            },
           }
         },
       },
@@ -1645,11 +1653,20 @@ export const injectExtensionAPIs = () => {
               sync[key] = typeof member === 'function' ? member.bind(local) : member
             }
             // Members that live on the prototype of the native area, which Object.keys does not list.
-            for (const name of ['get', 'getBytesInUse', 'getKeys', 'set', 'remove', 'clear', 'setAccessLevel']) {
+            for (const name of [
+              'get',
+              'getBytesInUse',
+              'getKeys',
+              'set',
+              'remove',
+              'clear',
+              'setAccessLevel',
+            ]) {
               const member = (local as any)[name]
               if (typeof member === 'function' && !sync[name]) sync[name] = member.bind(local)
             }
-            if (!sync.onChanged && (local as any).onChanged) sync.onChanged = (local as any).onChanged
+            if (!sync.onChanged && (local as any).onChanged)
+              sync.onChanged = (local as any).onChanged
           }
           Object.assign(sync, {
             QUOTA_BYTES: 102400,
