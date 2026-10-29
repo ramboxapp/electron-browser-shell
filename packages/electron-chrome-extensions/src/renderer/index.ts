@@ -1805,6 +1805,77 @@ export const injectExtensionAPIs = () => {
       },
     }
 
+    /*
+      The anti-crash floor: every public namespace of desktop Chrome that Electron does not provide
+      exists here, when — and only when — the manifest asks for it, as in Chrome.
+
+      The failure this prevents was measured three times in Rambox's catalog (NordPass on
+      `chrome.privacy`, Endpoint Verification on `chrome.gcm`, LastPass on `chrome.windows`): an
+      access at service-worker top level to something undefined kills the extension whole, with
+      nothing in any console. A namespace that answers "nothing" — or fails a call the way Chrome
+      fails one, with lastError or a rejection — is always better than its absence.
+
+      Most of these are honest stubs because the host has no such thing (no bookmarks, history,
+      sessions, tab groups, reading list, omnibox, voices or debugger). The rest are real and
+      backed by the main process: browsingData, system.storage, system.display, pageCapture and the
+      local half of instanceID. Surfaces and error strings were read from Edge 156.
+
+      Measured and left alone, because Electron 44.9.3 provides them natively and they answer:
+      `power`, `system.cpu`, `system.memory`, `printerProvider`. Left absent on purpose:
+      `userScripts` (Chrome hides it too until the user allows it), `dom`, `processes`, `dns`
+      and `enterprise.*`.
+    */
+    const declaredPermissions = new Set<string>(
+      ((manifest.permissions as string[] | undefined) ?? []).map(String),
+    )
+    const declares = (...permissions: string[]) =>
+      permissions.some((permission) => declaredPermissions.has(permission))
+
+    /**
+     * A method that answers the way Chrome's do: the callback with the value, or a promise of it;
+     * when `compute` throws, `chrome.runtime.lastError` for the callback, a rejection otherwise.
+     */
+    const answering =
+      (compute: (...args: any[]) => unknown) =>
+      (...args: any[]) => {
+        const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+        let value: unknown
+        try {
+          value = compute(...args)
+        } catch (error) {
+          const text = errorMessage(error)
+          if (callback) {
+            queueMicrotask(() => withLastError(text, () => callback()))
+            return
+          }
+          return Promise.reject(new Error(text))
+        }
+        if (callback) {
+          queueMicrotask(() => callback(value))
+          return
+        }
+        return Promise.resolve(value)
+      }
+    const failWith = (message: string | ((...args: any[]) => string)) =>
+      answering((...args: any[]) => {
+        throw new Error(typeof message === 'function' ? message(...args) : message)
+      })
+    /** Methods Chrome declares as returning nothing, synchronously. */
+    const noop = () => undefined
+    /** Events nothing in this host raises: the whole shape, never called. */
+    const inert = () => new Event()
+    const enumOf = (...values: string[]) =>
+      Object.fromEntries(
+        values.map((value) => [value.toUpperCase().replace(/[-.]/g, '_'), value]),
+      ) as Record<string, string>
+    const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value))
+
+    const floorDefinitions: Record<
+      string,
+      { shouldInject?: () => boolean; factory: (base: any) => any }
+    > = {
+    }
+
     // Initialize APIs
     //
     // Each namespace is injected on its own, because a single failure used to take out every
@@ -1815,10 +1886,15 @@ export const injectExtensionAPIs = () => {
     // did nothing at all. Reading `chrome[apiName]` can throw too (Chromium's namespaces are lazy
     // getters that load a binding module, and a module can fail to load: "No source for
     // require(webRequest)" on Electron 43), so the read is inside the try as well.
-    Object.keys(apiDefinitions).forEach((key: any) => {
+    // The floor goes through the same loop, so its namespaces get the same isolation and mirroring.
+    const allDefinitions: Record<
+      string,
+      { shouldInject?: () => boolean; factory: (base: any) => any }
+    > = { ...(apiDefinitions as Record<string, any>), ...floorDefinitions }
+    Object.keys(allDefinitions).forEach((key: any) => {
       const apiName: keyof typeof chrome = key
       try {
-        const api = apiDefinitions[apiName]!
+        const api = allDefinitions[apiName]!
 
         // Allow APIs to opt-out of being available in this context.
         if (api.shouldInject && !api.shouldInject()) return
@@ -1840,7 +1916,7 @@ export const injectExtensionAPIs = () => {
       once every repair below has run too. See mirrorOntoBrowserGlobal at the end of this function.
     */
     const replacedNamespaces = new Set(
-      Object.keys(apiDefinitions).filter((apiName) => !!(chrome as any)[apiName]),
+      Object.keys(allDefinitions).filter((apiName) => !!(chrome as any)[apiName]),
     )
 
     // Seed the active tab cache eagerly in extension contexts so early
