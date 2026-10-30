@@ -24,6 +24,16 @@ import { useExtensionBrowser } from './hooks'
  * A guest `<webview>` is covered separately (dnr-webview-guest-spec, scripting-webview-guest-spec);
  * this is the plain case, which has to hold first.
  */
+/*
+  How long a round trip between a content script and its background may take before it counts as
+  lost. The reply is only slow, never lost: with the machine's 32 cores saturated, the port's reply
+  took 7.3 s and 14.9 s and sendMessage's about 6 s (measured 2026-10-30). The 6 s that applied here
+  failed these tests in 4 of 5 runs under that load, and in about 1 of 3 runs of the full suite.
+  A reply that never comes still fails, only later.
+*/
+const ROUND_TRIP_MS = 30000
+const ROUND_TRIP_TEST_MS = ROUND_TRIP_MS + 15000
+
 describe('content script injection', () => {
   let server: http.Server
   let url: string
@@ -95,13 +105,14 @@ describe('content script injection', () => {
     expect(await attr('data-crx-second-pattern')).to.equal('ran')
   })
 
-  it('lets a content script open a port to its background and hear back', async () => {
+  it('lets a content script open a port to its background and hear back', async function () {
+    this.timeout(ROUND_TRIP_TEST_MS)
     expect(
       await attr('data-crx-port-opened'),
       'runtime.connect threw in the content script',
     ).to.equal('yes')
     expect(
-      await attr('data-crx-port-reply'),
+      await attr('data-crx-port-reply', ROUND_TRIP_MS),
       'the port never delivered the background reply',
     ).to.equal('pong')
   })
@@ -118,7 +129,8 @@ describe('content script injection', () => {
     ).to.equal('ran')
   })
 
-  it('delivers a tabs.sendMessage from the background to the content script', async () => {
+  it('delivers a tabs.sendMessage from the background to the content script', async function () {
+    this.timeout(ROUND_TRIP_TEST_MS)
     // The direction an extension uses to tell a page to act: autofill is the background deciding
     // and the content script doing. Dashlane's background logs "Could not establish connection.
     // Receiving end does not exist." in Rambox, which is what sent me here — measured afterwards,
@@ -132,8 +144,9 @@ describe('content script injection', () => {
     })
   })
 
-  it('lets a content script round-trip a sendMessage to its background', async () => {
-    expect(await attr('data-crx-sendmessage-reply')).to.equal('pong')
+  it('lets a content script round-trip a sendMessage to its background', async function () {
+    this.timeout(ROUND_TRIP_TEST_MS)
+    expect(await attr('data-crx-sendmessage-reply', ROUND_TRIP_MS)).to.equal('pong')
   })
 })
 
@@ -230,14 +243,17 @@ describe('content script injection in a <webview> guest', () => {
     ).to.equal('ran')
   })
 
-  it('reaches the background from inside the guest', async () => {
-    expect(await guestAttr('data-crx-port-reply'), 'the port never delivered a reply').to.equal(
-      'pong',
-    )
-    expect(await guestAttr('data-crx-sendmessage-reply')).to.equal('pong')
+  it('reaches the background from inside the guest', async function () {
+    this.timeout(ROUND_TRIP_TEST_MS)
+    expect(
+      await guestAttr('data-crx-port-reply', ROUND_TRIP_MS),
+      'the port never delivered a reply',
+    ).to.equal('pong')
+    expect(await guestAttr('data-crx-sendmessage-reply', ROUND_TRIP_MS)).to.equal('pong')
   })
 
-  it('delivers a tabs.sendMessage from the background into the guest', async () => {
+  it('delivers a tabs.sendMessage from the background into the guest', async function () {
+    this.timeout(ROUND_TRIP_TEST_MS)
     const guest = await guestContents()
     browser.extensions.addTab(guest, browser.window)
     browser.extensions.selectTab(guest)
