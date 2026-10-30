@@ -538,6 +538,92 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       return true
     }
 
+    /*
+      What a call answers, in the two shapes Chrome has: `outcome` calls without a callback and
+      reports the resolved value or the rejection; `outcome-callback` passes one and reports what it
+      received and `runtime.lastError` while it ran. `value` is '__undefined__' for undefined, so a
+      resolution with nothing is not confused with no answer.
+    */
+    case 'outcome':
+    case 'outcome-callback': {
+      const path = message.method.split('.')
+      const name = path.pop()
+      const owner = path.reduce((object, key) => (object ? object[key] : undefined), chrome)
+      const fn = owner && owner[name]
+      const shape = (value) => (value === undefined ? '__undefined__' : value)
+      if (typeof fn !== 'function') {
+        reply({ absent: true })
+        break
+      }
+      try {
+        if (message.type === 'outcome') {
+          Promise.resolve(fn.apply(owner, message.args || [])).then(
+            (value) => reply({ value: shape(value) }),
+            (error) => reply({ error: String((error && error.message) || error) }),
+          )
+        } else {
+          fn.apply(owner, [
+            ...(message.args || []),
+            (value) => {
+              const error = chrome.runtime.lastError
+              reply({ value: shape(value), lastError: error ? error.message : null })
+            },
+          ])
+        }
+      } catch (error) {
+        reply({ threw: String((error && error.message) || error) })
+      }
+      break
+    }
+
+    /*
+      Every dispatch of the named events from here on, kept until `recorded` reads them: how a spec
+      asserts that an event FIRES, with what, and how many times — and that one did not.
+    */
+    case 'record-events': {
+      self.__recorded = self.__recorded || {}
+      for (const name of message.names) {
+        if (self.__recorded[name]) {
+          self.__recorded[name].length = 0
+          continue
+        }
+        const path = name.split('.')
+        const event = path.reduce((object, key) => (object ? object[key] : undefined), chrome)
+        const seen = (self.__recorded[name] = [])
+        event.addListener((...args) => seen.push(JSON.parse(JSON.stringify(args))))
+      }
+      reply(true)
+      break
+    }
+
+    case 'recorded': {
+      reply((self.__recorded && self.__recorded[message.name]) || null)
+      break
+    }
+
+    case 'notifications-surface': {
+      const n = chrome.notifications
+      const events = {}
+      for (const name of [
+        'onButtonClicked',
+        'onClicked',
+        'onClosed',
+        'onPermissionLevelChanged',
+        'onShowSettings',
+      ]) {
+        events[name] = typeof (n[name] && n[name].addListener)
+      }
+      Promise.resolve(n.getPermissionLevel()).then((permissionLevel) =>
+        reply({
+          PermissionLevel: n.PermissionLevel,
+          TemplateType: n.TemplateType,
+          events,
+          permissionLevel,
+        }),
+      )
+      break
+    }
+
     // What the worker sees of the tabs and management events it registers at start-up.
     case 'event-shapes': {
       const shape = (event) => ({

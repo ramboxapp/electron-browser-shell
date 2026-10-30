@@ -68,6 +68,8 @@ export const useExtensionBrowser = (opts: {
   assignTabDetails?: ChromeExtensionImpl['assignTabDetails']
   /** What `windows.create` opens; specs of that API provide one, the rest leave it unimplemented. */
   createWindow?: ChromeExtensionImpl['createWindow']
+  /** The embedder's `tabs.discard`; specs of that API provide one, the rest leave it unimplemented. */
+  discardTab?: ChromeExtensionImpl['discardTab']
   /** Merged into the window's webPreferences — `webviewTag` for specs that need a real guest. */
   webPreferences?: Electron.WebPreferences
 }) => {
@@ -97,6 +99,7 @@ export const useExtensionBrowser = (opts: {
         opts.assignTabDetails?.(details, tab)
       },
       ...(opts.createWindow ? { createWindow: opts.createWindow } : {}),
+      ...(opts.discardTab ? { discardTab: opts.discardTab } : {}),
     })
 
     const extensionDir = opts.extensionPath
