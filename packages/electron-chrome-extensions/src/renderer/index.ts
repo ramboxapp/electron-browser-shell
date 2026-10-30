@@ -1245,6 +1245,13 @@ export const injectExtensionAPIs = () => {
             ),
             setEnabled: invokeExtension('management.setEnabled'),
             uninstallSelf: invokeExtension('management.uninstallSelf'),
+            // Chrome's methods for other extensions and for apps. There are no apps here, so the
+            // app ones fail as Chrome fails them for an extension (see ManagementAPI).
+            uninstall: invokeExtension('management.uninstall'),
+            launchApp: invokeExtension('management.launchApp'),
+            setLaunchType: invokeExtension('management.setLaunchType'),
+            createAppShortcut: invokeExtension('management.createAppShortcut'),
+            generateAppForLink: invokeExtension('management.generateAppForLink'),
             // Electron's binding carries onEnabled/onDisabled; the other two come from the library's
             // own load and unload events. Nothing is ever disabled here, so those two never fire.
             onInstalled: new ExtensionEvent('management.onInstalled'),

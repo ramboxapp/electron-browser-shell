@@ -70,3 +70,58 @@ describe('chrome.management events', () => {
     expect(removedId).to.equal(other.id)
   })
 })
+
+/*
+  ExtensionInfo as Edge 156 sends it — sixteen fields for an extension with no icons and no update
+  URL, the optional ones left out rather than sent as undefined — and the app methods Chrome has,
+  failing as Chrome fails them for an extension.
+*/
+describe('chrome.management, as Chrome answers', () => {
+  const server = useServer()
+  const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc-mv3' })
+  const outcome = (method: string, ...args: any[]): Promise<any> =>
+    browser.crx.raw({ type: 'outcome', method, args })
+
+  it('sends only the fields Chrome sends', async () => {
+    const { value } = await outcome('management.getSelf')
+    expect(Object.keys(value).sort()).to.deep.equal([
+      'description',
+      'enabled',
+      'homepageUrl',
+      'hostPermissions',
+      'id',
+      'installType',
+      'isApp',
+      'mayDisable',
+      'name',
+      'offlineEnabled',
+      'optionsUrl',
+      'permissions',
+      'shortName',
+      'type',
+      'version',
+      'versionName',
+    ])
+    expect(value.homepageUrl).to.equal('')
+    expect(value.versionName).to.equal('')
+  })
+
+  it("fails for an unknown id with Chrome's message", async () => {
+    const missing = 'abcdefghijklmnopabcdefghijklmnop'
+    const expected = { error: `Failed to find extension with id ${missing}.` }
+    expect(await outcome('management.get', missing)).to.deep.equal(expected)
+    expect(await outcome('management.uninstall', missing)).to.deep.equal(expected)
+    expect(await outcome('management.launchApp', missing)).to.deep.equal(expected)
+  })
+
+  it('refuses the app methods for an extension', async () => {
+    const id = browser.extension.id
+    const notAnApp = { error: `Extension ${id} is not an App.` }
+    expect(await outcome('management.launchApp', id)).to.deep.equal(notAnApp)
+    expect(await outcome('management.setLaunchType', id, 'OPEN_AS_WINDOW')).to.deep.equal(notAnApp)
+    expect(await outcome('management.createAppShortcut', id)).to.deep.equal(notAnApp)
+    expect(
+      (await outcome('management.generateAppForLink', 'https://example.com/', 'x')).error,
+    ).to.be.a('string')
+  })
+})

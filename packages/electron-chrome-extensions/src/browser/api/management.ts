@@ -12,21 +12,24 @@ const createExtensionInfo = (extension: Electron.Extension): chrome.management.E
   const icons = Object.entries(manifest.icons || {})
     .map(([size, file]) => ({ size: Number(size), url: `${extension.url}${file}` }))
     .filter((icon) => Number.isFinite(icon.size))
-  return {
+  /*
+    The fields Chrome sends, and no more. `disabledReason`, `icons` and `updateUrl` were always
+    present, as `undefined` when there was nothing to say, and Chrome leaves them out then (measured
+    in Edge 156: sixteen fields for an extension with no icons and no update URL; this answered
+    nineteen). `homepageUrl` and `versionName` are the empty string there, not absent.
+  */
+  const info: Record<string, unknown> = {
     id: extension.id,
     name: extension.name,
     shortName: manifest.short_name || extension.name,
     description: manifest.description || '',
     version: extension.version,
-    versionName: manifest.version_name,
+    versionName: manifest.version_name || '',
     enabled: true,
-    disabledReason: undefined,
     offlineEnabled: !!manifest.offline_enabled,
     // Chrome gives the options page's full URL; extensions open it from their own UI with it.
     optionsUrl: optionsPage ? `${extension.url}${optionsPage}` : '',
-    homepageUrl: manifest.homepage_url,
-    updateUrl: manifest.update_url,
-    icons: icons.length ? icons : undefined,
+    homepageUrl: manifest.homepage_url || '',
     permissions: (manifest.permissions as string[]) || [],
     // MV2 mixes host permissions into 'permissions'; filter for URL patterns.
     hostPermissions:
@@ -45,7 +48,10 @@ const createExtensionInfo = (extension: Electron.Extension): chrome.management.E
     isApp: false,
     mayDisable: false,
     type: 'extension',
-  } as chrome.management.ExtensionInfo
+  }
+  if (manifest.update_url) info.updateUrl = manifest.update_url
+  if (icons.length) info.icons = icons
+  return info as unknown as chrome.management.ExtensionInfo
 }
 
 /**
@@ -68,6 +74,26 @@ export class ManagementAPI {
     handle('management.uninstallSelf', () => {
       throw new Error('Extension uninstall is not available here.')
     })
+    // Uninstalling is the embedder's to offer; the id is checked first, as Chrome checks it.
+    handle('management.uninstall', (event: ExtensionEvent, id: string) => {
+      this.extensionOrThrow(id)
+      throw new Error('Extension uninstall is not available here.')
+    })
+    /*
+      App methods. Everything loaded here is an extension, and for an extension Chrome answers
+      "Extension <id> is not an App." (measured in Chromium 147 for launchApp). generateAppForLink
+      creates an app, which nothing here can hold.
+    */
+    const notAnApp = (event: ExtensionEvent, id: string) => {
+      this.extensionOrThrow(id)
+      throw new Error(`Extension ${id} is not an App.`)
+    }
+    handle('management.launchApp', notAnApp)
+    handle('management.setLaunchType', notAnApp)
+    handle('management.createAppShortcut', notAnApp)
+    handle('management.generateAppForLink', () => {
+      throw new Error('Apps cannot be created here.')
+    })
 
     /*
       onInstalled and onUninstalled, from the session's own load and unload events. An extension that
@@ -87,12 +113,17 @@ export class ManagementAPI {
     return this.ctx.session.extensions || this.ctx.session
   }
 
-  private get(event: ExtensionEvent, id: string) {
-    const extension = this.getSessionExtensions().getExtension(id)
+  // Chrome's message has no quotes around the id (Chromium 147 and Edge 156).
+  private extensionOrThrow(id: string) {
+    const extension = typeof id === 'string' ? this.getSessionExtensions().getExtension(id) : null
     if (!extension) {
-      throw new Error(`Failed to find extension with id '${id}'.`)
+      throw new Error(`Failed to find extension with id ${id}.`)
     }
-    return createExtensionInfo(extension)
+    return extension
+  }
+
+  private get(event: ExtensionEvent, id: string) {
+    return createExtensionInfo(this.extensionOrThrow(id))
   }
 
   private getAll(event: ExtensionEvent) {
