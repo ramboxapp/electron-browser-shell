@@ -1760,8 +1760,117 @@ export const injectExtensionAPIs = () => {
 
       tabs: {
         factory: (base) => {
+          /*
+            Zoom. Electron implements the four methods natively, and they mostly answer as Chrome's
+            do (measured on 44.9.3 against Chromium 147: the factor, the settings, the manual-mode
+            refusal). What they get wrong is wrapped here, and nothing else:
+            - with no tab id they fail ("No such tab") where Chrome uses the active tab;
+            - an unknown tab reads "No such tab", not Chrome's "No tab with id: N.";
+            - `setZoom(tab, 0)` set the factor to 0.25 — Chrome resets to the default;
+            - `setZoom` succeeded in "disabled" mode, which Chrome refuses;
+            - tabs.onZoomChange never fired, where Chrome fires it after every successful setZoom
+              and setZoomSettings. The main process does that now (tabs.reportZoomChange), reading
+              the new factor from the tab itself.
+            Without the native methods (another Electron), the main process answers getZoom and
+            setZoom on its own, and the settings stay Chrome's defaults.
+          */
+          const nativeMethod = (name: string) => {
+            const fn = (base as any)?.[name]
+            return typeof fn === 'function'
+              ? (...args: any[]): Promise<any> => fn.apply(base, args)
+              : undefined
+          }
+          const nativeGetZoom = nativeMethod('getZoom')
+          const nativeSetZoom = nativeMethod('setZoom')
+          const nativeGetZoomSettings = nativeMethod('getZoomSettings')
+          const nativeSetZoomSettings = nativeMethod('setZoomSettings')
+          const DEFAULT_ZOOM_SETTINGS = {
+            defaultZoomFactor: 1,
+            mode: 'automatic',
+            scope: 'per-origin',
+          }
+          const answerAsync =
+            (run: (...args: any[]) => Promise<any>) =>
+            (...args: any[]) => {
+              const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+              const promise = run(...args)
+              if (!callback) return promise
+              promise.then(
+                (value) => callback(value),
+                (error) => withLastError(errorMessage(error), () => callback()),
+              )
+            }
+          const tabIdOrActive = async (tabId: unknown): Promise<number | undefined> => {
+            if (typeof tabId === 'number') return tabId
+            const [tab] = await (invokeExtension('tabs.query')({
+              active: true,
+              currentWindow: true,
+            }) as Promise<any[]>)
+            return tab?.id
+          }
+          const inChromeWords = (tabId: unknown) => (error: unknown) => {
+            const message = errorMessage(error)
+            throw new Error(message === 'No such tab' ? `No tab with id: ${tabId}.` : message)
+          }
+          const zoomSettingsOf = async (tabId: number | undefined) => {
+            if (!nativeGetZoomSettings) {
+              await invokeExtension('tabs.getZoom')(tabId)
+              return { ...DEFAULT_ZOOM_SETTINGS }
+            }
+            return nativeGetZoomSettings(tabId).catch(inChromeWords(tabId))
+          }
+          // The optional leading tab id, as Chrome's signatures put it: (tabId?, value).
+          const leadingTabId = (args: any[]) => (args.length >= 2 ? args : [undefined, args[0]])
+          const zoom = {
+            getZoom: answerAsync(async (tabId?: number) => {
+              const id = await tabIdOrActive(tabId)
+              if (!nativeGetZoom) return invokeExtension('tabs.getZoom')(id)
+              return nativeGetZoom(id).catch(inChromeWords(id))
+            }),
+            setZoom: answerAsync(async (...args: any[]) => {
+              const [tabId, zoomFactor] = leadingTabId(args)
+              const id = await tabIdOrActive(tabId)
+              if (!nativeSetZoom) return invokeExtension('tabs.setZoom')(id, zoomFactor)
+              const settings = await zoomSettingsOf(id)
+              if (settings.mode === 'disabled') {
+                throw new Error('Cannot zoom a tab in disabled mode.')
+              }
+              const factor = zoomFactor === 0 ? settings.defaultZoomFactor || 1 : zoomFactor
+              await nativeSetZoom(id, factor).catch(inChromeWords(id))
+              await invokeExtension('tabs.reportZoomChange')(
+                id,
+                { mode: settings.mode, scope: settings.scope },
+                factor,
+              )
+            }),
+            getZoomSettings: answerAsync(async (tabId?: number) =>
+              zoomSettingsOf(await tabIdOrActive(tabId)),
+            ),
+            setZoomSettings: answerAsync(async (...args: any[]) => {
+              const [tabId, zoomSettings] = leadingTabId(args)
+              const id = await tabIdOrActive(tabId)
+              if (!nativeSetZoomSettings) {
+                const asked = zoomSettings || {}
+                if (
+                  (asked.mode && asked.mode !== 'automatic') ||
+                  (asked.scope && asked.scope !== 'per-origin')
+                ) {
+                  throw new Error('Zoom settings cannot be changed here.')
+                }
+                return
+              }
+              await nativeSetZoomSettings(id, zoomSettings).catch(inChromeWords(id))
+              const now = await zoomSettingsOf(id)
+              await invokeExtension('tabs.reportZoomChange')(id, {
+                mode: now.mode,
+                scope: now.scope,
+              })
+            }),
+          }
+
           const api = {
             ...base,
+            ...zoom,
             create: invokeExtension('tabs.create'),
             executeScript: async function (
               arg1: unknown,
@@ -1802,6 +1911,14 @@ export const injectExtensionAPIs = () => {
             goForward: invokeExtension('tabs.goForward'),
             duplicate: invokeExtension('tabs.duplicate'),
             highlight: invokeExtension('tabs.highlight'),
+            // A new position in the tab's own window, with onMoved (see TabsAPI.move).
+            move: invokeExtension('tabs.move'),
+            // Through the embedder's discardTab hook, or failing as Chrome does without one.
+            discard: invokeExtension('tabs.discard'),
+            // No tab groups here: group fails as Chrome does in a window that cannot group, and
+            // ungroup resolves, as it does for a tab that is in no group.
+            group: invokeExtension('tabs.group'),
+            ungroup: invokeExtension('tabs.ungroup'),
             onCreated: new ExtensionEvent('tabs.onCreated'),
             onRemoved: new ExtensionEvent('tabs.onRemoved'),
             onUpdated: new ExtensionEvent('tabs.onUpdated'),
@@ -1811,9 +1928,10 @@ export const injectExtensionAPIs = () => {
               The rest of chrome.tabs' events. An extension registers these at the top of its worker
               as a matter of course (a tab manager listens to all of them), and a namespace missing
               one threw there and took the worker's registration with it. onHighlighted follows every
-              activation and onZoomChange the user's zoom; the other three describe a tab moving
-              between positions or windows, which the embedder's tabs never do, so they never fire —
-              which is the truth of the model, not a stub.
+              activation, onZoomChange the user's zoom and every setZoom/setZoomSettings, onMoved
+              every tabs.move that changes an index. onDetached and onAttached describe a tab
+              changing windows, which the embedder's tabs never do, so they never fire — which is
+              the truth of the model, not a stub.
             */
             onHighlighted: new ExtensionEvent('tabs.onHighlighted'),
             onZoomChange: new ExtensionEvent('tabs.onZoomChange'),

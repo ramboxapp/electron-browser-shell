@@ -46,8 +46,54 @@ export class TabsAPI {
     handle('tabs.detectLanguage', this.detectLanguage.bind(this))
     handle('tabs.duplicate', this.duplicate.bind(this))
     handle('tabs.highlight', this.highlight.bind(this))
+    handle('tabs.move', this.move.bind(this))
+    handle('tabs.discard', this.discard.bind(this))
+    handle('tabs.group', this.group.bind(this))
+    handle('tabs.ungroup', this.ungroup.bind(this))
+    handle('tabs.reportZoomChange', this.reportZoomChange.bind(this))
+    // Only reached when Electron's own getZoom/setZoom are missing (see the preload).
+    handle('tabs.getZoom', this.getZoom.bind(this))
+    handle('tabs.setZoom', this.setZoom.bind(this))
 
     this.ctx.store.on('tab-added', this.observeTab.bind(this))
+  }
+
+  /*
+    What Chrome keeps about a tab and Electron has no notion of: whether it is pinned, whether the
+    browser may discard it on its own, whether it is discarded, who opened it, when it was last
+    active and the URL it is navigating to. Pinning and auto-discarding change nothing on screen
+    here — the embedder's tabs have no pin and nothing discards them behind its back — but they are
+    the extension's own state, and Chrome reports back what it was told (measured in Chromium 147:
+    `update({ pinned: true })` answers `pinned: true` and fires onUpdated `{ pinned: true }`).
+  */
+  private tabState = new Map<
+    number,
+    {
+      pinned: boolean
+      autoDiscardable: boolean
+      discarded: boolean
+      openerTabId?: number
+      lastAccessed: number
+      pendingUrl?: string
+    }
+  >()
+
+  private stateOf(tabId: number) {
+    let state = this.tabState.get(tabId)
+    if (!state) {
+      state = { pinned: false, autoDiscardable: true, discarded: false, lastAccessed: Date.now() }
+      this.tabState.set(tabId, state)
+    }
+    return state
+  }
+
+  /** The zoom factor each tab was last reported at, so onZoomChange can say what it changed from. */
+  private zoomFactors = new Map<number, number>()
+
+  private tabOrThrow(tabId: unknown) {
+    const tab = typeof tabId === 'number' ? this.ctx.store.getTabById(tabId) : undefined
+    if (!tab) throw new Error(`No tab with id: ${tabId}.`)
+    return tab
   }
 
   /**
@@ -100,12 +146,34 @@ export class TabsAPI {
       this.onUpdated(tabId)
     }
 
-    const navigationHandler = (event: Electron.Event & { frame?: Electron.WebFrameMain }) => {
+    const navigationHandler = (
+      event: Electron.Event & {
+        frame?: Electron.WebFrameMain
+        url?: string
+        isSameDocument?: boolean
+        isMainFrame?: boolean
+      },
+    ) => {
       // Only the top frame maps to the tab's own navigation state.
       const frame = event?.frame
       if (frame && !frame.isDestroyed() && frame !== frame.top) return
+      // A main-frame navigation to a new document: what Chrome reports as `pendingUrl` until it
+      // commits, and the end of a discard (a discarded tab comes back by loading again).
+      if (event?.isMainFrame !== false && event?.isSameDocument === false && event.url) {
+        const state = this.stateOf(tabId)
+        state.pendingUrl = event.url
+        state.discarded = false
+      }
       this.onUpdated(tabId)
     }
+
+    // The pending navigation committed, or failed: either way there is nothing pending anymore.
+    const settledHandler = () => {
+      const state = this.tabState.get(tabId)
+      if (state) state.pendingUrl = undefined
+    }
+    const settledEvents = ['did-navigate', 'did-fail-load', 'did-stop-loading']
+    settledEvents.forEach((eventName) => tab.on(eventName as any, settledHandler))
 
     updateEvents.forEach((eventName) => {
       tab.on(eventName as any, updateHandler)
@@ -120,20 +188,22 @@ export class TabsAPI {
     }
     tab.on('page-favicon-updated', faviconHandler)
 
-    // tabs.onZoomChange, from the one zoom signal Electron gives: the user's own zoom gesture. A zoom
-    // the embedder sets programmatically is not reported here, which is a gap, not a lie.
-    let lastZoomFactor = tab.getZoomFactor()
+    // tabs.onZoomChange from the user's own zoom gesture, the one zoom signal Electron gives. An
+    // extension's tabs.setZoom reports through reportZoomChange; a zoom the embedder sets on its own
+    // is not reported, which is a gap, not a lie.
+    this.zoomFactors.set(tabId, tab.getZoomFactor())
     const zoomHandler = () => {
       if (tab.isDestroyed()) return
       const newZoomFactor = tab.getZoomFactor()
-      if (newZoomFactor === lastZoomFactor) return
-      const oldZoomFactor = lastZoomFactor
-      lastZoomFactor = newZoomFactor
+      const oldZoomFactor = this.zoomFactors.get(tabId) ?? 1
+      if (newZoomFactor === oldZoomFactor) return
+      this.zoomFactors.set(tabId, newZoomFactor)
       this.ctx.router.broadcastEvent('tabs.onZoomChange', {
         tabId,
         oldZoomFactor,
         newZoomFactor,
-        zoomSettings: { mode: 'automatic', scope: 'per-origin', defaultZoomFactor: 1 },
+        // Chrome's event carries these two and not defaultZoomFactor (measured in Chromium 147).
+        zoomSettings: { mode: 'automatic', scope: 'per-origin' },
       })
     }
     tab.on('zoom-changed', zoomHandler)
@@ -147,11 +217,15 @@ export class TabsAPI {
       })
       tab.off('page-favicon-updated', faviconHandler)
       tab.off('zoom-changed', zoomHandler)
+      settledEvents.forEach((eventName) => tab.off(eventName as any, settledHandler))
+      this.zoomFactors.delete(tabId)
 
       this.ctx.store.removeTab(tab)
       this.onRemoved(tabId)
+      this.tabState.delete(tabId)
     })
 
+    this.stateOf(tabId)
     this.onCreated(tabId)
     this.onActivated(tabId)
 
@@ -164,12 +238,14 @@ export class TabsAPI {
     let win = this.ctx.store.tabToWindow.get(tab)
     if (win?.isDestroyed()) win = undefined
     const [width = 0, height = 0] = win ? win.getSize() : []
+    const state = this.stateOf(tabId)
+    const loading = tab.isLoadingMainFrame()
 
     const details: chrome.tabs.Tab = {
       active: activeTab?.id === tabId,
       audible: tab.isCurrentlyAudible(),
-      autoDiscardable: true,
-      discarded: false,
+      autoDiscardable: state.autoDiscardable,
+      discarded: state.discarded,
       favIconUrl: tab.favicon || undefined,
       frozen: false,
       height,
@@ -179,11 +255,18 @@ export class TabsAPI {
       highlighted: activeTab?.id === tabId,
       id: tabId,
       incognito: false,
-      index: -1, // TODO
-      groupId: -1, // TODO(mv3): implement?
+      // Its position within its own window, as Chrome counts it. It used to be -1 here and then
+      // overwritten by query() with the position in the RESULT, so `query({ index: 0 })` matched
+      // every tab and two tabs of one window could both claim index 0.
+      index: this.ctx.store.getTabIndex(tab),
+      // The embedder's tabs are never grouped (see group() below): TAB_GROUP_ID_NONE.
+      groupId: -1,
+      lastAccessed: state.lastAccessed,
       mutedInfo: { muted: tab.audioMuted },
-      pinned: false,
-      selected: true,
+      pinned: state.pinned,
+      selected: activeTab?.id === tabId,
+      // No split views here: SPLIT_VIEW_ID_NONE, which Chrome reports for every tab outside one.
+      splitViewId: -1,
       /*
         The tab's status is its own document's, not its iframes'. `isLoading()` is true while ANY
         frame loads, so a page that merely adds an iframe went 'loading' → 'complete' and every
@@ -195,12 +278,19 @@ export class TabsAPI {
         page having navigated. `isLoadingMainFrame()` is Electron's name for Chromium's
         ShouldShowLoadingUI(), which is the main-frame loading state Chrome reports here.
       */
-      status: tab.isLoadingMainFrame() ? 'loading' : 'complete',
+      status: state.discarded ? 'unloaded' : loading ? 'loading' : 'complete',
       title: tab.getTitle(),
       url: tab.getURL(), // TODO: tab.mainFrame.url (Electron 12)
       width,
       windowId: win ? win.id : -1,
+    } as chrome.tabs.Tab
+
+    // Present only when there is something to say, as in Chrome: a tab that has not committed the
+    // URL it is loading, and a tab that was opened (or told it was opened) by another.
+    if (loading && state.pendingUrl && state.pendingUrl !== details.url) {
+      details.pendingUrl = state.pendingUrl
     }
+    if (typeof state.openerTabId === 'number') details.openerTabId = state.openerTabId
 
     if (typeof this.ctx.store.impl.assignTabDetails === 'function') {
       this.ctx.store.impl.assignTabDetails(details, tab)
@@ -260,6 +350,12 @@ export class TabsAPI {
     // worker went idle — wake it before the consumer's createTab() runs.
     await wakeExtensionServiceWorker(this.ctx.session, event.extension.id)
     const tab = await this.ctx.store.createTab({ ...details, url })
+    // The tab started loading before it was observed, so its navigation was never seen: what it is
+    // loading is the URL it was asked for, which Chrome answers as `pendingUrl` (Chromium 147).
+    if (url && tab.isLoadingMainFrame() && tab.getURL() !== url) {
+      this.stateOf(tab.id).pendingUrl = url
+      this.ctx.store.tabDetailsCache.delete(tab.id)
+    }
     const tabDetails = this.getTabDetails(tab)
     if (details.active) {
       queueMicrotask(() => this.onActivated(tab.id))
@@ -339,6 +435,8 @@ export class TabsAPI {
           return false
         if (isSet(info.frozen) && info.frozen !== tab.frozen) return false
         if (isSet(info.groupId) && info.groupId !== tab.groupId) return false
+        if (isSet(info.index) && info.index !== tab.index) return false
+        if (isSet((info as any).splitViewId) && (info as any).splitViewId !== -1) return false
         if (isSet(info.status) && info.status !== tab.status) return false
         if (isSet(info.title) && typeof info.title === 'string' && typeof tab.title === 'string') {
           if (!matchesTitlePattern(info.title, tab.title)) return false
@@ -360,15 +458,14 @@ export class TabsAPI {
             return false
           }
         }
-        // if (isSet(info.windowType) && info.windowType !== tab.windowType) return false
-        // if (isSet(info.index) && info.index !== tab.index) return false
-        return true
-      })
-      .map((tab, index) => {
-        if (tab) {
-          tab.index = index
+        if (isSet(info.windowType)) {
+          const win =
+            typeof tab.windowId === 'number'
+              ? this.ctx.store.getWindowById(tab.windowId)
+              : undefined
+          if (!win || this.ctx.store.getWindowType(win) !== info.windowType) return false
         }
-        return tab
+        return true
       })
     return filteredTabs
   }
@@ -450,25 +547,218 @@ export class TabsAPI {
     const updateProperties: chrome.tabs.UpdateProperties =
       (typeof arg1 === 'object' ? (arg1 as any) : (arg2 as any)) || {}
 
-    const tab = tabId
-      ? this.ctx.store.getTabById(tabId)
-      : this.ctx.store.getActiveTabOfCurrentWindow()
+    // A tab that is not there fails, as in Chrome ("No tab with id: N."), instead of answering
+    // nothing; an omitted id means the active tab of the current window.
+    const tab =
+      typeof tabId === 'number'
+        ? this.tabOrThrow(tabId)
+        : this.ctx.store.getActiveTabOfCurrentWindow()
     if (!tab) return
 
     tabId = tab.id
 
     const props = updateProperties
+    const state = this.stateOf(tabId)
+
+    // Validated before anything changes, so a bad opener does not leave a half-applied update.
+    if (typeof props.openerTabId === 'number') this.tabOrThrow(props.openerTabId)
 
     const url = props.url ? validateExtensionUrl(props.url, event.extension) : undefined
     if (url) await tab.loadURL(url)
 
     if (typeof props.muted === 'boolean') tab.setAudioMuted(props.muted)
+    if (typeof props.pinned === 'boolean') state.pinned = props.pinned
+    if (typeof props.autoDiscardable === 'boolean') state.autoDiscardable = props.autoDiscardable
+    if (typeof props.openerTabId === 'number') state.openerTabId = props.openerTabId
 
-    if (props.active) this.onActivated(tabId)
+    // Chrome makes a tab it is asked to highlight the active one (measured in Chromium 147), and
+    // here the active tab is the only highlighted one, so both mean the same activation.
+    if (props.active || props.highlighted) this.onActivated(tabId)
 
     this.onUpdated(tabId)
 
     return this.createTabDetails(tab)
+  }
+
+  /*
+    `tabs.move`: a new position within the tab's own window, with tabs.onMoved for each tab whose
+    index changed (Chromium 147 fires nothing for a move to where the tab already is). The order is
+    the library's model of the window — the embedder's tab strip, if it has one, is not reordered.
+
+    A tab cannot change windows: the embedder's WebContents live in the view that holds them. Chrome
+    refuses a move it cannot make with this message.
+  */
+  private move(event: ExtensionEvent, tabIds: number | number[], moveProperties?: any) {
+    if (!moveProperties || typeof moveProperties.index !== 'number') {
+      throw new Error(
+        "Error in invocation of tabs.move([integer|array] tabIds, object moveProperties, optional function callback): Error at parameter 'moveProperties': Missing required property 'index'.",
+      )
+    }
+    const ids = Array.isArray(tabIds) ? tabIds : [tabIds]
+    const tabs = ids.map((id) => this.tabOrThrow(id))
+
+    if (
+      typeof moveProperties.windowId === 'number' &&
+      moveProperties.windowId !== TabsAPI.WINDOW_ID_CURRENT
+    ) {
+      const target = this.ctx.store.getWindowById(moveProperties.windowId)
+      if (!target) throw new Error(`No window with id: ${moveProperties.windowId}.`)
+      if (tabs.some((tab) => this.ctx.store.tabToWindow.get(tab) !== target)) {
+        throw new Error('Tabs can only be moved to and from normal windows.')
+      }
+    }
+
+    let toIndex: number = moveProperties.index
+    const moved = tabs.map((tab) => {
+      const win = this.ctx.store.tabToWindow.get(tab)
+      const last = this.ctx.store.getTabsOfWindow(win).length - 1
+      const fromIndex = this.ctx.store.getTabIndex(tab)
+      const target = toIndex < 0 || toIndex > last ? last : toIndex
+      if (target !== fromIndex) {
+        this.ctx.store.moveTabWithinWindow(tab, target)
+        this.refreshIndexes(win)
+        this.ctx.router.broadcastEvent('tabs.onMoved', tab.id, {
+          windowId: win?.id,
+          fromIndex,
+          toIndex: target,
+        })
+      }
+      // The next tab of a multi-tab move goes right after this one, as in Chrome.
+      if (toIndex >= 0) toIndex = target + 1
+      return this.createTabDetails(tab)
+    })
+    return Array.isArray(tabIds) && moved.length !== 1 ? moved : moved[0]
+  }
+
+  /** The cached details of a window's tabs carry their index, so a move changes them all. */
+  private refreshIndexes(win: Electron.BaseWindow | undefined) {
+    for (const tab of this.ctx.store.getTabsOfWindow(win)) {
+      const cached = this.ctx.store.tabDetailsCache.get(tab.id)
+      if (cached) cached.index = this.ctx.store.getTabIndex(tab)
+    }
+  }
+
+  /*
+    `tabs.discard`, through the embedder: discarding means unloading the page, and only the app
+    knows how its pages unload (Rambox hibernates its services). Without the hook — or when the hook
+    refuses — the call fails as Chrome fails it for a tab it will not discard. Chrome discards the
+    active tab too (measured in Chromium 147 and Edge 156), so it is not refused here either.
+
+    Chrome picks the least important tab when no id is given; the library has no measure of that,
+    so it answers the way Chrome does when there is nothing it can pick.
+  */
+  private async discard(event: ExtensionEvent, tabId?: number) {
+    if (typeof tabId !== 'number') throw new Error('Cannot find a tab to discard.')
+    const tab = this.tabOrThrow(tabId)
+    const state = this.stateOf(tab.id)
+    const hook = this.ctx.store.impl.discardTab
+    if (state.discarded || typeof hook !== 'function') {
+      throw new Error(`Cannot discard tab with id: ${tabId}.`)
+    }
+    const result = await hook.call(this.ctx.store.impl, tab)
+    if (result === false) throw new Error(`Cannot discard tab with id: ${tabId}.`)
+
+    // The embedder replaced the tab: what Edge 156 reports, a new id and onReplaced(added, removed).
+    // Chromium 147 keeps the id instead; both are Chrome, and the embedder decides which this is.
+    if (result && typeof result === 'object' && (result as Electron.WebContents).id !== tab.id) {
+      const replacement = result as Electron.WebContents
+      Object.assign(this.stateOf(replacement.id), {
+        ...state,
+        discarded: true,
+        pendingUrl: undefined,
+      })
+      this.ctx.router.broadcastEvent('tabs.onReplaced', replacement.id, tab.id)
+      return this.createTabDetails(replacement)
+    }
+
+    state.discarded = true
+    state.pendingUrl = undefined
+    // onUpdated reports { discarded: true, status: 'unloaded' }, as Chrome does.
+    this.onUpdated(tab.id)
+    return this.createTabDetails(tab)
+  }
+
+  /*
+    Tab groups do not exist here (chrome.tabGroups is a stub: no group is ever found), so grouping
+    fails with Chrome's own message for a window whose tabs cannot be grouped. Everything Chrome
+    checks first is checked first, with its messages (measured in Chromium 147): an unknown tab, an
+    unknown group, an unknown window.
+  */
+  private group(event: ExtensionEvent, options?: any) {
+    const ids = Array.isArray(options?.tabIds) ? options.tabIds : [options?.tabIds]
+    if (ids.length === 0 || ids.some((id: unknown) => typeof id !== 'number')) {
+      throw new Error(
+        "Error in invocation of tabs.group(object options, optional function callback): Error at parameter 'options': Error at property 'tabIds': Value did not match any choice.",
+      )
+    }
+    ids.forEach((id: number) => this.tabOrThrow(id))
+    if (typeof options.groupId === 'number') {
+      throw new Error(`No group with id: ${options.groupId}.`)
+    }
+    const windowId = options.createProperties?.windowId
+    if (typeof windowId === 'number' && !this.ctx.store.getWindowById(windowId)) {
+      throw new Error(`No window with id: ${windowId}.`)
+    }
+    throw new Error('Grouping is not supported by tabs in this window.')
+  }
+
+  /** Every tab here is already ungrouped, which Chrome answers by resolving (Chromium 147). */
+  private ungroup(event: ExtensionEvent, tabIds: number | number[]) {
+    const ids = Array.isArray(tabIds) ? tabIds : [tabIds]
+    ids.forEach((id) => this.tabOrThrow(id))
+  }
+
+  /*
+    tabs.onZoomChange for a zoom an extension set. Electron implements getZoom/setZoom/
+    getZoomSettings/setZoomSettings natively but never dispatches the event (measured on 44.9.3:
+    zero events for seven zoom changes, where Chromium 147 fires one per successful setZoom and one
+    per setZoomSettings). The preload calls this after each of those succeeds; the factor is read
+    here, from the tab, rather than taken from the caller, except in manual mode, where Chrome
+    leaves the page as it is and only reports what the extension asked for.
+  */
+  private reportZoomChange(
+    event: ExtensionEvent,
+    tabId: number,
+    zoomSettings: { mode?: string; scope?: string } = {},
+    requestedFactor?: number,
+  ) {
+    const tab = this.tabOrThrow(tabId)
+    const mode = ['automatic', 'manual', 'disabled'].includes(zoomSettings.mode as string)
+      ? zoomSettings.mode
+      : 'automatic'
+    const scope = zoomSettings.scope === 'per-tab' ? 'per-tab' : 'per-origin'
+    const oldZoomFactor = this.zoomFactors.get(tab.id) ?? 1
+    const newZoomFactor =
+      mode === 'manual' && typeof requestedFactor === 'number'
+        ? requestedFactor
+        : tab.getZoomFactor()
+    this.zoomFactors.set(tab.id, newZoomFactor)
+    this.ctx.router.broadcastEvent('tabs.onZoomChange', {
+      tabId: tab.id,
+      oldZoomFactor,
+      newZoomFactor,
+      zoomSettings: { mode, scope },
+    })
+  }
+
+  private getZoom(event: ExtensionEvent, tabId?: number) {
+    const tab =
+      typeof tabId === 'number'
+        ? this.tabOrThrow(tabId)
+        : this.ctx.store.getActiveTabOfCurrentWindow()
+    if (!tab) throw new Error(`No tab with id: ${tabId}.`)
+    return tab.getZoomFactor()
+  }
+
+  private setZoom(event: ExtensionEvent, tabId: number | undefined, zoomFactor: number) {
+    const tab =
+      typeof tabId === 'number'
+        ? this.tabOrThrow(tabId)
+        : this.ctx.store.getActiveTabOfCurrentWindow()
+    if (!tab) throw new Error(`No tab with id: ${tabId}.`)
+    // 0 resets to the default, as in Chrome.
+    tab.setZoomFactor(zoomFactor === 0 ? 1 : zoomFactor)
+    this.reportZoomChange(event, tab.id)
   }
 
   /** A new tab on the same URL, next to the original, as Chrome's `tabs.duplicate`. */
@@ -622,9 +912,17 @@ export class TabsAPI {
 
     this.ctx.store.setActiveTab(tab)
 
-    // invalidate cache since 'active' has changed
+    this.stateOf(tabId).lastAccessed = Date.now()
+
+    // invalidate cache since 'active' has changed — within this window only: another window keeps
+    // its own active tab.
     this.ctx.store.tabDetailsCache.forEach((tabInfo, cacheTabId) => {
-      tabInfo.active = tabId === cacheTabId
+      if (win && tabInfo.windowId !== win.id) return
+      const isActive = tabId === cacheTabId
+      tabInfo.active = isActive
+      tabInfo.highlighted = isActive
+      tabInfo.selected = isActive
+      if (isActive) tabInfo.lastAccessed = this.stateOf(tabId).lastAccessed
     })
 
     this.ctx.router.broadcastEvent('tabs.onActivated', {

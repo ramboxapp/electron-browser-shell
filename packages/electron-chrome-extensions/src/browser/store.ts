@@ -35,6 +35,12 @@ export class ExtensionStore extends EventEmitter {
    */
   extensionContextTypes = new WeakMap<Electron.WebContents, 'POPUP' | 'OFFSCREEN_DOCUMENT'>()
 
+  /**
+   * The type a window was created with through `windows.create` (`'popup'` for a popup or a panel,
+   * as Chrome reports both). Windows the embedder registers itself are `'normal'`.
+   */
+  windowTypes = new Map<number, 'normal' | 'popup'>()
+
   constructor(public impl: ChromeExtensionImpl) {
     super()
   }
@@ -81,6 +87,7 @@ export class ExtensionStore extends EventEmitter {
     if (!this.windows.has(window)) return
 
     this.windows.delete(window)
+    this.windowTypes.delete(window.id)
     this.forgetFocusedWindow(window)
 
     if (typeof this.impl.removeWindow === 'function') {
@@ -106,6 +113,45 @@ export class ExtensionStore extends EventEmitter {
 
   getTabById(tabId: number) {
     return Array.from(this.tabs).find((tab) => !tab.isDestroyed() && tab.id === tabId)
+  }
+
+  /** What `windows.Window.type` reports for a window. */
+  getWindowType(window: Electron.BaseWindow): 'normal' | 'popup' {
+    return this.windowTypes.get(window.id) ?? 'normal'
+  }
+
+  /**
+   * A window's tabs, in their order: the order they were registered in, as the embedder's tab
+   * strip has no order the library can read, changed only by `tabs.move`. A tab's `index` is its
+   * position here, as in Chrome, where it is the position within its own window.
+   */
+  getTabsOfWindow(window: Electron.BaseWindow | undefined) {
+    if (!window) return []
+    return Array.from(this.tabs).filter(
+      (tab) => !tab.isDestroyed() && this.tabToWindow.get(tab) === window,
+    )
+  }
+
+  getTabIndex(tab: Electron.WebContents) {
+    return this.getTabsOfWindow(this.tabToWindow.get(tab)).indexOf(tab)
+  }
+
+  /**
+   * Puts a tab at `toIndex` within its window, keeping the other windows' tabs where they were.
+   * The set is rebuilt in place, not replaced, because callers hold on to `tabs`.
+   */
+  moveTabWithinWindow(tab: Electron.WebContents, toIndex: number) {
+    const window = this.tabToWindow.get(tab)
+    const siblings = this.getTabsOfWindow(window).filter((other) => other !== tab)
+    siblings.splice(Math.max(0, Math.min(toIndex, siblings.length)), 0, tab)
+    const ordered: Electron.WebContents[] = []
+    let next = 0
+    for (const other of this.tabs) {
+      const sameWindow = !other.isDestroyed() && this.tabToWindow.get(other) === window
+      ordered.push(sameWindow ? siblings[next++] : other)
+    }
+    this.tabs.clear()
+    for (const other of ordered) this.tabs.add(other)
   }
 
   addTab(tab: Electron.WebContents, window: Electron.BaseWindow) {
