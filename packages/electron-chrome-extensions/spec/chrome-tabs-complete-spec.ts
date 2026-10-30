@@ -236,7 +236,7 @@ describe('chrome.tabs.update() fields', () => {
 })
 
 describe('chrome.tabs.query() filters and the Tab object', () => {
-  const { browser, outcome, tabId, addSibling } = useTabsBrowser()
+  const { browser, outcome, outcomeCallback, tabId, addSibling } = useTabsBrowser()
 
   it('filters by the index within the window', async () => {
     const sibling = await addSibling()
@@ -263,6 +263,17 @@ describe('chrome.tabs.query() filters and the Tab object', () => {
     expect(tab.autoDiscardable).to.equal(true)
     expect(tab).to.not.have.property('pendingUrl')
     expect(tab).to.not.have.property('openerTabId')
+  })
+
+  // Chromium 147: the promise rejects with "No tab with id: N.", and the callback gets undefined
+  // with lastError set. It used to answer {id: -1}.
+  it('fails get for a tab that is not there, with lastError for a callback', async () => {
+    expect(await outcome('tabs.get', 987654)).to.deep.equal({ error: 'No tab with id: 987654.' })
+    expect(await outcomeCallback('tabs.get', 987654)).to.deep.equal({
+      value: '__undefined__',
+      lastError: 'No tab with id: 987654.',
+    })
+    expect((await outcome('tabs.get', tabId())).value.id).to.equal(tabId())
   })
 })
 

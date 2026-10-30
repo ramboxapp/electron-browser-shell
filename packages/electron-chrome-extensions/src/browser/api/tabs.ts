@@ -310,7 +310,12 @@ export class TabsAPI {
 
   private get(event: ExtensionEvent, tabId: number) {
     const tab = this.ctx.store.getTabById(tabId)
-    if (!tab) return { id: TabsAPI.TAB_ID_NONE }
+    // A tab that is not there fails as in Chrome ("No tab with id: N."): the promise rejects and the
+    // callback gets undefined with lastError set. It used to answer {id: -1}, which is truthy, so an
+    // extension that asks "is this tab still open?" (uBlock's expiring filters, Proton Pass's
+    // stale tab ids) was told yes forever. Chrome throws synchronously for a negative id or a
+    // missing argument (schema check); here those reject too, which is the safer side.
+    if (!tab) throw new Error(`No tab with id: ${tabId}.`)
     return this.getTabDetails(tab)
   }
 
