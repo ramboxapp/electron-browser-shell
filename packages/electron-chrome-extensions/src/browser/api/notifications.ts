@@ -48,6 +48,8 @@ const stripScopeFromIdentifier = (id: string) => {
 
 export class NotificationsAPI {
   private registry = new Map<string, Notification>()
+  /** Notifications whose onClosed was already sent, or must not be: Electron's 'close' skips them. */
+  private settled = new WeakSet<Notification>()
 
   constructor(private ctx: ExtensionContext) {
     const handle = this.ctx.router.apiHandler()
@@ -61,18 +63,29 @@ export class NotificationsAPI {
     sessionExtensions.on('extension-unloaded', (event, extension) => {
       for (const [key, notification] of this.registry) {
         if (key.startsWith(extension.id)) {
+          this.settled.add(notification)
           notification.close()
+          this.registry.delete(key)
         }
       }
     })
   }
 
-  /** Chrome resolves whether there was a notification to clear (measured in Chromium 147). */
+  /**
+   * Chrome resolves whether there was a notification to clear (measured in Chromium 147), and fires
+   * onClosed(id, false) for it (measured in Edge 156). Electron emits no 'close' for a toast that
+   * never reached the screen, or one already in the Action Center, so the event is sent here.
+   */
   private clear = ({ extension }: ExtensionEvent, id: string) => {
     const notificationId = createScopedIdentifier(extension, id)
     const notification = this.registry.get(notificationId)
-    notification?.close()
-    // A notification that never reached the screen emits no 'close': forget it here as well.
+    if (notification) {
+      if (!this.settled.has(notification)) {
+        this.settled.add(notification)
+        this.ctx.router.sendEvent(extension.id, 'notifications.onClosed', id, false)
+      }
+      notification.close()
+    }
     this.registry.delete(notificationId)
     return !!notification
   }
@@ -107,8 +120,11 @@ export class NotificationsAPI {
 
     const notificationId = createScopedIdentifier(extension, id)
 
-    if (this.registry.has(notificationId)) {
-      this.registry.get(notificationId)?.close()
+    // A create with an id in use replaces that notification; the extension is not told it closed.
+    const replaced = this.registry.get(notificationId)
+    if (replaced) {
+      this.settled.add(replaced)
+      replaced.close()
     }
 
     let icon: string | Electron.NativeImage | undefined
@@ -179,11 +195,24 @@ export class NotificationsAPI {
       this.ctx.router.sendEvent(extension.id, 'notifications.onButtonClicked', id, buttonIndex)
     })
 
-    notification.once('close', () => {
-      const byUser = true // TODO
-      this.ctx.router.sendEvent(extension.id, 'notifications.onClosed', id, byUser)
+    /*
+      Electron 44 says why the toast closed. A toast that times out used to be reported as closed by
+      the user (byUser was always true) and was dropped from the registry, yet it stayed in the
+      Action Center, where a click reached nothing: Grammarly's "needs to be reloaded" with its
+      Reload button did nothing from Win+N. Edge reports a timeout as onClosed(id, false) and takes
+      the toast out of the Action Center, so it is removed here too (a close() after the first
+      'close' removes it without emitting again). Without a reason (other platforms, or Electron
+      43), 'close' is the user's.
+    */
+    notification.once('close', (details?: { reason?: string }) => {
+      const reason = details?.reason
+      if (reason === 'timedOut') notification.close()
       // Only if it is still this one: a create with the same id replaces it before it closes.
       if (this.registry.get(notificationId) === notification) this.registry.delete(notificationId)
+      if (this.settled.has(notification)) return
+      this.settled.add(notification)
+      const byUser = reason ? reason === 'userCanceled' : true
+      this.ctx.router.sendEvent(extension.id, 'notifications.onClosed', id, byUser)
     })
 
     notification.show()

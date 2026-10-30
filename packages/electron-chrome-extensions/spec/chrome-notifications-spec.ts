@@ -204,6 +204,51 @@ describe('chrome.notifications buttons', () => {
     await outcome('notifications.clear', 'icon')
   })
 
+  describe('onClosed', () => {
+    const closed = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      return browser.crx.raw({ type: 'recorded', name: 'notifications.onClosed' })
+    }
+    beforeEach(async () => {
+      await browser.crx.raw({ type: 'record-events', names: ['notifications.onClosed'] })
+    })
+
+    it('reports a timed out toast as not closed by the user, and forgets it', async () => {
+      await outcome('notifications.create', 'expired', options)
+      shown[0].emit('close', { reason: 'timedOut' })
+      expect(await closed()).to.deep.equal([['expired', false]])
+      expect((await outcome('notifications.getAll')).value).to.deep.equal({})
+    })
+
+    it('reports a toast the user dismissed as closed by the user', async () => {
+      await outcome('notifications.create', 'dismissed', options)
+      shown[0].emit('close', { reason: 'userCanceled' })
+      expect(await closed()).to.deep.equal([['dismissed', true]])
+    })
+
+    it("takes a 'close' without a reason as the user's", async () => {
+      await outcome('notifications.create', 'no-reason', options)
+      shown[0].emit('close', {})
+      expect(await closed()).to.deep.equal([['no-reason', true]])
+    })
+
+    it('fires onClosed(id, false) once on clear, even if Electron then emits close', async () => {
+      await outcome('notifications.create', 'cleared', options)
+      expect((await outcome('notifications.clear', 'cleared')).value).to.equal(true)
+      shown[0].emit('close', { reason: 'applicationHidden' })
+      expect(await closed()).to.deep.equal([['cleared', false]])
+    })
+
+    it('fires nothing for a notification replaced by a create with the same id', async () => {
+      await outcome('notifications.create', 'same', options)
+      await outcome('notifications.create', 'same', options)
+      shown[0].emit('close', { reason: 'applicationHidden' })
+      expect(await closed()).to.deep.equal([])
+      expect((await outcome('notifications.getAll')).value).to.deep.equal({ same: true })
+      await outcome('notifications.clear', 'same')
+    })
+  })
+
   it('resolves whether there was a notification to clear or update', async () => {
     await outcome('notifications.create', 'exists', options)
     expect((await outcome('notifications.update', 'exists', { title: 'x' })).value).to.equal(true)
