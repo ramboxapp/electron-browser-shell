@@ -1583,6 +1583,30 @@ export const injectExtensionAPIs = () => {
               openOptionsPage: invokeExtension('runtime.openOptionsPage'),
               sendNativeMessage: invokeExtension('runtime.sendNativeMessage'),
               /*
+                Electron's answer has `arch` and `os` and not `nacl_arch` (measured on 44.9.3: two
+                fields, Chromium 147 and Edge 156 three). Chrome still reports it — the architecture
+                Native Client would use, which has no arm64 (PlatformNaclArch stops at 'arm') — so
+                the native answer gets it here and keeps everything else.
+              */
+              ...(typeof (base as any)?.getPlatformInfo === 'function'
+                ? {
+                    getPlatformInfo: (callback?: (info: any) => void) => {
+                      const withNaclArch = (info: any) =>
+                        info && typeof info === 'object' && !info.nacl_arch
+                          ? { ...info, nacl_arch: info.arch === 'arm64' ? 'arm' : info.arch }
+                          : info
+                      const promise = Promise.resolve(
+                        (base as any).getPlatformInfo.call(base),
+                      ).then(withNaclArch)
+                      if (typeof callback !== 'function') return promise
+                      promise.then(
+                        (info) => callback(info),
+                        (error) => withLastError(errorMessage(error), () => (callback as any)()),
+                      )
+                    },
+                  }
+                : {}),
+              /*
               Electron's own requestUpdateCheck sets lastError "Autoupdate is not enabled." and hands
               the callback nothing — and without a callback the promise REJECTS. Chrome never fails
               here: it answers a status (measured in Edge 156: callback ('throttled', { version: '' }),
