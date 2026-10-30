@@ -352,12 +352,12 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       break
     }
 
-    // Exercises the WebSocket proxy from a real MV3 service worker: open a
-    // socket, receive an unsolicited text frame, request + receive a binary
-    // frame, then close. Replies with an ordered log of what happened.
+    // A WebSocket from a real MV3 service worker: open a socket, receive an unsolicited text frame,
+    // request + receive a binary frame, then close. Replies with an ordered log of what happened,
+    // and whether the constructor is the browser's own.
     case 'websocket-test': {
       const { url } = message
-      const got = []
+      const got = [/\[native code\]/.test(String(WebSocket)) ? 'native' : 'replaced']
       const ws = new WebSocket(url)
       ws.binaryType = 'arraybuffer'
       ws.onopen = () => {

@@ -7,11 +7,23 @@ import { useExtensionBrowser, useServer } from './hooks'
 // the ws@7 (runtime) vs @types/ws@8 named-export skew.
 const WebSocketServer = require('ws').Server
 
-// Native WebSocket fails to connect from an MV3 service worker in this Electron
-// (docs/EXTENSIONS_API_MANUAL_TEST.md §9 Bug #2). The library replaces it with
-// a proxy that opens the real socket in the main process. This spec runs the
-// exact scenario that fails without the proxy — a green run proves the fix.
-describe('WebSocket proxy (MV3 service worker)', () => {
+/*
+  The browser's own WebSocket, in an MV3 service worker.
+
+  The library used to replace it there with a proxy that opened the socket in the main process,
+  after a measurement of 11/07/2026 read "a WebSocket from a worker fails for every host but
+  capi.grammarly.com" as an Electron bug. Measured again on 30/10/2026 with a bare main process (no
+  library) on Electron 43.0.0, 44.9.3+wvcus and 44.10.0: the native WebSocket connects from an MV3
+  worker, to a local ws:// server and to a public wss:// one, and exchanges text and binary frames.
+  The one host that worked then is the only WebSocket host in Grammarly's own `connect-src`, and that
+  was the cause: in Rambox on 44.9.3+wvcus, with the proxy gone, Grammarly's worker opens
+  wss://capi.grammarly.com and fails wss://ws.postman-echo.com with a `securitypolicyviolation` for
+  `connect-src` — its CSP doing what Chrome's does. The proxy went, and with it a socket that
+  skipped the extension's CSP.
+
+  This is the scenario the proxy existed for; it has to pass with the native constructor.
+*/
+describe('WebSocket in an MV3 service worker', () => {
   const server = useServer()
   const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc-mv3' })
 
@@ -38,9 +50,10 @@ describe('WebSocket proxy (MV3 service worker)', () => {
     wss?.close()
   })
 
-  it('connects, exchanges text + binary frames, and closes', async () => {
+  it('is the native constructor, and connects, exchanges text + binary frames, and closes', async () => {
     const got: string[] = await browser.crx.raw({ type: 'websocket-test', url: wsUrl })
 
+    expect(got[0], 'the worker keeps the browser WebSocket').to.equal('native')
     expect(got, 'onopen fired').to.include('open')
     expect(got, 'received the server text frame').to.include('text:server-text')
     expect(

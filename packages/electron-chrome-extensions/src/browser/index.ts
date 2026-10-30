@@ -27,13 +27,12 @@ import { ExtensionRouter } from './router'
 import { checkLicense, License } from './license'
 import { readLoadedExtensionManifest } from './manifest'
 import { PermissionsAPI } from './api/permissions'
-import { WebSocketAPI } from './api/websocket'
 import { BrowsingDataAPI } from './api/browsing-data'
 import { InstanceIDAPI } from './api/instance-id'
 import { PageCaptureAPI } from './api/page-capture'
 import { SystemAPI } from './api/system'
-import { StorageAPI } from './api/storage'
 import { SidePanelAPI, SidePanelShowDetails } from './api/side-panel'
+import { StorageAPI } from './api/storage'
 import { resolvePartition } from './partition'
 
 function checkVersion() {
@@ -165,12 +164,11 @@ export class ElectronChromeExtensions extends EventEmitter {
     pageCapture: PageCaptureAPI
     permissions: PermissionsAPI
     runtime: RuntimeAPI
-    storage: StorageAPI
     sidePanel: SidePanelAPI
+    storage: StorageAPI
     system: SystemAPI
     tabs: TabsAPI
     webNavigation: WebNavigationAPI
-    webSocket: WebSocketAPI
     windows: WindowsAPI
   }
 
@@ -215,13 +213,12 @@ export class ElectronChromeExtensions extends EventEmitter {
       offscreen: new OffscreenAPI(this.ctx),
       pageCapture: new PageCaptureAPI(this.ctx),
       permissions: new PermissionsAPI(this.ctx),
-      storage: new StorageAPI(this.ctx),
       runtime: new RuntimeAPI(this.ctx),
       sidePanel: new SidePanelAPI(this.ctx),
+      storage: new StorageAPI(this.ctx),
       system: new SystemAPI(this.ctx),
       tabs: new TabsAPI(this.ctx),
       webNavigation: new WebNavigationAPI(this.ctx),
-      webSocket: new WebSocketAPI(this.ctx),
       windows: new WindowsAPI(this.ctx),
     }
 

@@ -139,23 +139,23 @@ export const injectExtensionAPIs = () => {
     invokeExtension(extensionId, 'runtime.disconnectNative', {}, connectionId)
   }
 
-  // WebSocket proxy bridge. Native WebSocket fails to connect from an MV3
-  // service worker in this Electron version (see the WebSocketAPI docs); the
-  // real socket is opened in the main process and its frames are relayed here.
-  interface WebSocketCallbacks {
-    onOpen: (payload: { protocol: string; extensions: string }) => void
-    onMessage: (payload: { data: string | Uint8Array; binary: boolean }) => void
-    onClose: (payload: { code: number; reason: string; wasClean: boolean }) => void
-    onError: () => void
+  /*
+    The message bundle the locale patch left in the manifest, kept on this side of the bridge so
+    `getMessage` — a synchronous API an extension calls hundreds of times — crosses it with a name
+    and its substitutions, not with the whole bundle every call. Set once per context, from the
+    main world, which is where the manifest is read.
+  */
+  let i18nState: CrxI18nState | undefined
+  const i18nInit = (extensionId: string, payload: CrxI18nPayload) => {
+    if (!payload || !payload.messages) return
+    i18nState = { locale: payload.locale, messages: payload.messages, extensionId }
   }
-  const connectWebSocket = (
-    extensionId: string,
-    connectionId: string,
-    url: string,
-    protocols: string[],
-    callbacks: WebSocketCallbacks,
-  ) => {
-    const onOpen = (_e: Electron.IpcRendererEvent, payload: any) => callbacks.onOpen(payload)
+  const i18nGetMessage = (
+    name: unknown,
+    substitutions?: unknown,
+    options?: { escapeLt?: boolean },
+  ) => (i18nState ? formatExtensionMessage(i18nState, name, substitutions, options) : '')
+
   /*
     Whether this Electron delivers `storage.onChanged` to an extension's service worker on its own.
 
@@ -194,69 +194,15 @@ export const injectExtensionAPIs = () => {
       .catch(() => {})
   }
 
-    const onMessage = (_e: Electron.IpcRendererEvent, payload: any) => callbacks.onMessage(payload)
+  const electronContext = {
     storageChangeRelay: !workerStorageEventsAreNative(),
     reportStorageChanges,
-    const onClose = (_e: Electron.IpcRendererEvent, payload: any) => callbacks.onClose(payload)
-    const onError = () => callbacks.onError()
-    ipcRenderer.on(`crx-websocket-open-${connectionId}`, onOpen)
-    ipcRenderer.on(`crx-websocket-message-${connectionId}`, onMessage)
-    ipcRenderer.on(`crx-websocket-close-${connectionId}`, onClose)
-    ipcRenderer.on(`crx-websocket-error-${connectionId}`, onError)
-    // A connect the main process refuses fails the socket like a network error would.
-    invokeExtension(extensionId, 'websocket.connect', {}, connectionId, url, protocols).catch(
-      () => {
-        callbacks.onError()
-        callbacks.onClose({ code: 1006, reason: '', wasClean: false })
-      },
-    )
-    // Disposer removes the per-connection listeners once the socket closes.
-    return () => {
-      ipcRenderer.off(`crx-websocket-open-${connectionId}`, onOpen)
-      ipcRenderer.off(`crx-websocket-message-${connectionId}`, onMessage)
-      ipcRenderer.off(`crx-websocket-close-${connectionId}`, onClose)
-      ipcRenderer.off(`crx-websocket-error-${connectionId}`, onError)
-    }
-  }
-  const sendWebSocketFrame = (connectionId: string, data: string | Uint8Array) => {
-    ipcRenderer.send(`crx-websocket-send-${connectionId}`, data)
-  }
-  const closeWebSocket = (
-    extensionId: string,
-    connectionId: string,
-    code?: number,
-    reason?: string,
-  ) => {
-    invokeExtension(extensionId, 'websocket.close', {}, connectionId, code, reason)
-  }
-
-  /*
-    The message bundle the locale patch left in the manifest, kept on this side of the bridge so
-    `getMessage` — a synchronous API an extension calls hundreds of times — crosses it with a name
-    and its substitutions, not with the whole bundle every call. Set once per context, from the
-    main world, which is where the manifest is read.
-  */
-  let i18nState: CrxI18nState | undefined
-  const i18nInit = (extensionId: string, payload: CrxI18nPayload) => {
-    if (!payload || !payload.messages) return
-    i18nState = { locale: payload.locale, messages: payload.messages, extensionId }
-  }
-  const i18nGetMessage = (
-    name: unknown,
-    substitutions?: unknown,
-    options?: { escapeLt?: boolean },
-  ) => (i18nState ? formatExtensionMessage(i18nState, name, substitutions, options) : '')
-
-  const electronContext = {
     invokeExtension,
     addExtensionListener,
     removeExtensionListener,
     hasExtensionListeners,
     connectNative,
     disconnectNative,
-    connectWebSocket,
-    sendWebSocketFrame,
-    closeWebSocket,
     i18nInit,
     i18nGetMessage,
     // chrome.fontSettings' schema, which the main world cannot import (see mainWorldScript).
@@ -562,147 +508,6 @@ export const injectExtensionAPIs = () => {
       }
       onMessage: chrome.runtime.PortMessageEvent = new Event() as any
       onDisconnect: chrome.runtime.PortDisconnectEvent = new Event() as any
-    }
-
-    // The DOM `Event` constructor, reached explicitly because mainWorldScript
-    // defines a local `Event` class (the chrome.events shim) that shadows it.
-    const NativeEvent = (globalThis as any).Event
-
-    /**
-     * Drop-in replacement for the global `WebSocket`, installed only in service
-     * workers (native WebSocket fails to connect there in this Electron — see
-     * WebSocketAPI). Implements the WHATWG interface but relays frames through
-     * the `electron` bridge to a real socket in the main process.
-     */
-    class ProxyWebSocket extends EventTarget {
-      static readonly CONNECTING = 0
-      static readonly OPEN = 1
-      static readonly CLOSING = 2
-      static readonly CLOSED = 3
-      readonly CONNECTING = 0
-      readonly OPEN = 1
-      readonly CLOSING = 2
-      readonly CLOSED = 3
-
-      url: string
-      readyState = 0
-      bufferedAmount = 0
-      extensions = ''
-      protocol = ''
-      binaryType: 'blob' | 'arraybuffer' = 'blob'
-
-      onopen: ((ev: any) => any) | null = null
-      onmessage: ((ev: MessageEvent) => any) | null = null
-      onerror: ((ev: any) => any) | null = null
-      onclose: ((ev: CloseEvent) => any) | null = null
-
-      private _id: string
-      private _dispose?: () => void
-
-      constructor(url: string, protocols?: string | string[]) {
-        super()
-
-        // WHATWG requires a synchronous throw on an invalid URL/scheme.
-        const resolved = new URL(url, (self as any).location?.href)
-        if (resolved.protocol !== 'ws:' && resolved.protocol !== 'wss:') {
-          throw new SyntaxError(
-            `Failed to construct 'WebSocket': The URL's scheme must be either 'ws' or 'wss'. '${resolved.protocol}' is not allowed.`,
-          )
-        }
-
-        this.url = resolved.href
-        this._id = (crypto as any).randomUUID()
-        const protocolList = typeof protocols === 'string' ? [protocols] : protocols || []
-
-        this._dispose = electron.connectWebSocket(extensionId, this._id, this.url, protocolList, {
-          onOpen: (payload) => {
-            this.readyState = 1
-            this.protocol = payload.protocol || ''
-            this.extensions = payload.extensions || ''
-            this._fire('open', new NativeEvent('open'))
-          },
-          onMessage: (payload) => {
-            let data: any
-            if (payload.binary) {
-              const bytes = payload.data as Uint8Array
-              const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
-              data = this.binaryType === 'arraybuffer' ? ab : new Blob([ab])
-            } else {
-              data = payload.data
-            }
-            this._fire('message', new MessageEvent('message', { data }))
-          },
-          onClose: (payload) => {
-            this.readyState = 3
-            this._teardown()
-            this._fire(
-              'close',
-              new CloseEvent('close', {
-                code: payload.code,
-                reason: payload.reason,
-                wasClean: payload.wasClean,
-              }),
-            )
-          },
-          onError: () => {
-            this._fire('error', new NativeEvent('error'))
-          },
-        })
-      }
-
-      send(data: string | ArrayBufferLike | ArrayBufferView | Blob) {
-        if (this.readyState === 0) {
-          throw new DOMException(
-            "Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.",
-            'InvalidStateError',
-          )
-        }
-        if (this.readyState !== 1) return
-
-        if (typeof data === 'string') {
-          electron.sendWebSocketFrame(this._id, data)
-        } else if (data instanceof Blob) {
-          // Blob has no sync bytes; send once resolved (ordering caveat, but
-          // extensions overwhelmingly send strings or typed arrays).
-          data.arrayBuffer().then((ab) => {
-            if (this.readyState === 1) electron.sendWebSocketFrame(this._id, new Uint8Array(ab))
-          })
-        } else if (data instanceof ArrayBuffer) {
-          electron.sendWebSocketFrame(this._id, new Uint8Array(data))
-        } else if (ArrayBuffer.isView(data)) {
-          electron.sendWebSocketFrame(
-            this._id,
-            new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
-          )
-        } else {
-          electron.sendWebSocketFrame(this._id, String(data))
-        }
-      }
-
-      close(code?: number, reason?: string) {
-        if (this.readyState === 2 || this.readyState === 3) return
-        this.readyState = 2
-        electron.closeWebSocket(extensionId, this._id, code, reason)
-      }
-
-      private _teardown() {
-        if (this._dispose) {
-          this._dispose()
-          this._dispose = undefined
-        }
-      }
-
-      private _fire(type: string, event: any) {
-        const handler = (this as any)['on' + type]
-        if (typeof handler === 'function') {
-          try {
-            handler.call(this, event)
-          } catch (error) {
-            console.error(error)
-          }
-        }
-        this.dispatchEvent(event)
-      }
     }
 
     type DeepPartial<T> = {
@@ -1665,6 +1470,201 @@ export const injectExtensionAPIs = () => {
                   ['contextIds', 'contextId'],
                   ['tabIds', 'tabId'],
                   ['windowIds', 'windowId'],
+                  ['frameIds', 'frameId'],
+                  ['documentIds', 'documentId'],
+                  ['documentUrls', 'documentUrl'],
+                  ['documentOrigins', 'documentOrigin'],
+                ]
+                const matches = (context: any) =>
+                  keys.every(
+                    ([filterKey, field]) =>
+                      !Array.isArray(filter[filterKey]) ||
+                      filter[filterKey].includes(context[field]),
+                  ) &&
+                  (typeof filter.incognito !== 'boolean' || context.incognito === filter.incognito)
+                const promise = Promise.all([
+                  native(),
+                  invokeExtension('runtime.getDocumentContexts')() as Promise<any[]>,
+                ]).then(([background, documents]) =>
+                  [...background, ...(Array.isArray(documents) ? documents : [])].filter(matches),
+                )
+                if (typeof callback === 'function') {
+                  promise.then(callback)
+                  return
+                }
+                return promise
+              },
+              openOptionsPage: invokeExtension('runtime.openOptionsPage'),
+              sendNativeMessage: invokeExtension('runtime.sendNativeMessage'),
+              /*
+                Electron's answer has `arch` and `os` and not `nacl_arch` (measured on 44.9.3: two
+                fields, Chromium 147 and Edge 156 three). Chrome still reports it — the architecture
+                Native Client would use, which has no arm64 (PlatformNaclArch stops at 'arm') — so
+                the native answer gets it here and keeps everything else.
+              */
+              ...(typeof (base as any)?.getPlatformInfo === 'function'
+                ? {
+                    getPlatformInfo: (callback?: (info: any) => void) => {
+                      const withNaclArch = (info: any) =>
+                        info && typeof info === 'object' && !info.nacl_arch
+                          ? { ...info, nacl_arch: info.arch === 'arm64' ? 'arm' : info.arch }
+                          : info
+                      const promise = Promise.resolve(
+                        (base as any).getPlatformInfo.call(base),
+                      ).then(withNaclArch)
+                      if (typeof callback !== 'function') return promise
+                      promise.then(
+                        (info) => callback(info),
+                        (error) => withLastError(errorMessage(error), () => (callback as any)()),
+                      )
+                    },
+                  }
+                : {}),
+              /*
+              Electron's own requestUpdateCheck sets lastError "Autoupdate is not enabled." and hands
+              the callback nothing — and without a callback the promise REJECTS. Chrome never fails
+              here: it answers a status (measured in Edge 156: callback ('throttled', { version: '' }),
+              promise { status: 'throttled', version: '' }). Grammarly 14.1342.0 calls it on every
+              worker start, without reading lastError, so each boot logged an unchecked lastError; a
+              caller that awaits it would get an unhandled rejection instead.
+
+              There is no updater in an Electron embedder — the host ships extension updates itself —
+              so the true answer is that there is no update, in the shape Chrome gives.
+            */
+              requestUpdateCheck: (
+                callback?: (status: string, details: { version: string }) => void,
+              ) => {
+                const status = 'no_update'
+                const details = { version: '' }
+                if (typeof callback === 'function') {
+                  queueMicrotask(() => callback(status, details))
+                  return
+                }
+                return Promise.resolve({ status, ...details })
+              },
+            },
+            () => injectedLastError ?? base?.lastError,
+          )
+        },
+      },
+
+      /*
+        The side panel's state, open/close and events live in the main process (api/side-panel.ts);
+        the embedder shows the panel. Every method answers in both shapes, a promise and a callback
+        with lastError, as Chrome's do.
+      */
+      sidePanel: {
+        shouldInject: () => manifest.manifest_version === 3,
+        factory: (base) => {
+          return {
+            ...base,
+            Side: { LEFT: 'left', RIGHT: 'right' },
+            getOptions: invokeExtension('sidePanel.getOptions'),
+            setOptions: invokeExtension('sidePanel.setOptions'),
+            getPanelBehavior: invokeExtension('sidePanel.getPanelBehavior'),
+            setPanelBehavior: invokeExtension('sidePanel.setPanelBehavior'),
+            getLayout: invokeExtension('sidePanel.getLayout'),
+            open: invokeExtension('sidePanel.open'),
+            close: invokeExtension('sidePanel.close'),
+            onOpened: new ExtensionEvent('sidePanel.onOpened'),
+            onClosed: new ExtensionEvent('sidePanel.onClosed'),
+          }
+        },
+      },
+
+      storage: {
+        factory: (base) => {
+          const local = base && base.local
+
+          /*
+            `managed` is the administrator's policy store. It is read-only, and on a machine with no
+            enterprise policy installed Chrome answers every read with an empty result. Electron has no
+            policy backend, so empty is not a fallback here: it is the same answer Chrome gives, and the
+            only honest one.
+
+            It used to alias `local`, which was wrong in two ways.
+
+            It handed an extension its OWN data back as administrator policy. `managed.get(null)`
+            returned the whole local store, and a password manager reads that area for vault policy —
+            measured in Rambox, Grammarly's `managed.get(null)` came back holding its alarms, its
+            cached config and the active tab's URL.
+
+            And every read took a round trip to the main process, which a caller can lose. Real
+            extensions race a policy read against a timeout — Grammarly gives it 3s — and measured
+            with the worker's event loop blocked past such a deadline, the IPC answer never arrives
+            and the timer wins, while an answer resolved in a microtask lands the instant the loop
+            frees up. There is nothing to fetch here, so this area never leaves the renderer.
+
+            (That measurement is NOT a diagnosis of Grammarly's own "Manage storage timeout" errors:
+            its `get`, copied verbatim into its own worker, resolves in 0 ms across the exact window
+            where its calls expire. This change does not stop them. See
+            docs/EXTENSION_CATALOG_HEALTH.md in the Rambox monorepo.)
+
+            `sync` still aliases `local`: it is a real read/write store, and backing it with local data
+            is what an extension expects to find in it.
+          */
+          const EMPTY_RESULT = () => ({}) as Record<string, unknown>
+
+          const managedGet = (...args: any[]) => {
+            const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+            const keys = args[0]
+            // Chrome returns the defaults an extension passes and overrides none of them, because
+            // there is no policy to override them with. Arrays and plain keys simply find nothing.
+            const result =
+              keys && typeof keys === 'object' && !Array.isArray(keys)
+                ? { ...(keys as Record<string, unknown>) }
+                : EMPTY_RESULT()
+            if (callback) {
+              queueMicrotask(() => callback(result))
+              return
+            }
+            return Promise.resolve(result)
+          }
+
+          /*
+            Chrome exposes the write methods on the managed area and fails the call; it reports that
+            through `runtime.lastError` for a callback, which a preload cannot set, so the callback
+            form here comes back without one. The promise form — what MV3 code uses — rejects with
+            Chrome's own message.
+          */
+          const readOnly =
+            () =>
+            (...args: any[]) => {
+              const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+              if (callback) {
+                queueMicrotask(() => callback())
+                return
+              }
+              return Promise.reject(new Error('This is a read-only store.'))
+            }
+
+          // Policy never changes while the app runs, so this event has nothing to report. Taking
+          // local's would deliver the extension's own writes as policy changes, which is the leak
+          // above in event form.
+          const inertOnChanged = {
+            addListener: () => {},
+            removeListener: () => {},
+            hasListener: () => false,
+            hasListeners: () => false,
+          }
+
+          const managed = {
+            get: managedGet,
+            getKeys: localStub([]),
+            getBytesInUse: localStub(0),
+            set: readOnly(),
+            remove: readOnly(),
+            clear: readOnly(),
+            onChanged: inertOnChanged,
+          }
+
+          /*
+            `sync` aliases `local`, with the constants Chrome puts on the sync area. The alias used
+            to be the local object itself, whose constants are local's (QUOTA_BYTES alone), so
+            `sync.MAX_ITEMS` and `sync.QUOTA_BYTES_PER_ITEM` read undefined: LanguageTool 11.5.0
+            splits its dictionary into chunks sized by them, and a NaN chunk size keeps one chunk.
+            Methods stay bound to local, which is where the data lives.
+          */
           /*
             `storage.onChanged` for the service worker, on an Electron that does not deliver it there
             (43 and 44 below 44.10, measured; see workerStorageEventsAreNative in the isolated world).
@@ -1896,206 +1896,6 @@ export const injectExtensionAPIs = () => {
               )
           }
 
-                  ['frameIds', 'frameId'],
-                  ['documentIds', 'documentId'],
-                  ['documentUrls', 'documentUrl'],
-                  ['documentOrigins', 'documentOrigin'],
-                ]
-                const matches = (context: any) =>
-                  keys.every(
-                    ([filterKey, field]) =>
-                      !Array.isArray(filter[filterKey]) ||
-                      filter[filterKey].includes(context[field]),
-                  ) &&
-                  (typeof filter.incognito !== 'boolean' || context.incognito === filter.incognito)
-                const promise = Promise.all([
-                  native(),
-                  invokeExtension('runtime.getDocumentContexts')() as Promise<any[]>,
-                ]).then(([background, documents]) =>
-                  [...background, ...(Array.isArray(documents) ? documents : [])].filter(matches),
-                )
-                if (typeof callback === 'function') {
-                  promise.then(callback)
-                  return
-                }
-                return promise
-              },
-              openOptionsPage: invokeExtension('runtime.openOptionsPage'),
-            ...(localArea ? { local: localArea } : {}),
-            ...(sessionArea ? { session: sessionArea } : {}),
-            ...(workerEvents
-              ? { onChanged: workerEvents.makeEvent('any', (base as any).onChanged) }
-              : {}),
-              sendNativeMessage: invokeExtension('runtime.sendNativeMessage'),
-              /*
-                Electron's answer has `arch` and `os` and not `nacl_arch` (measured on 44.9.3: two
-                fields, Chromium 147 and Edge 156 three). Chrome still reports it — the architecture
-                Native Client would use, which has no arm64 (PlatformNaclArch stops at 'arm') — so
-                the native answer gets it here and keeps everything else.
-              */
-              ...(typeof (base as any)?.getPlatformInfo === 'function'
-                ? {
-                    getPlatformInfo: (callback?: (info: any) => void) => {
-                      const withNaclArch = (info: any) =>
-                        info && typeof info === 'object' && !info.nacl_arch
-                          ? { ...info, nacl_arch: info.arch === 'arm64' ? 'arm' : info.arch }
-                          : info
-                      const promise = Promise.resolve(
-                        (base as any).getPlatformInfo.call(base),
-                      ).then(withNaclArch)
-                      if (typeof callback !== 'function') return promise
-                      promise.then(
-                        (info) => callback(info),
-                        (error) => withLastError(errorMessage(error), () => (callback as any)()),
-                      )
-                    },
-                  }
-                : {}),
-              /*
-              Electron's own requestUpdateCheck sets lastError "Autoupdate is not enabled." and hands
-              the callback nothing — and without a callback the promise REJECTS. Chrome never fails
-              here: it answers a status (measured in Edge 156: callback ('throttled', { version: '' }),
-              promise { status: 'throttled', version: '' }). Grammarly 14.1342.0 calls it on every
-              worker start, without reading lastError, so each boot logged an unchecked lastError; a
-              caller that awaits it would get an unhandled rejection instead.
-
-              There is no updater in an Electron embedder — the host ships extension updates itself —
-              so the true answer is that there is no update, in the shape Chrome gives.
-            */
-              requestUpdateCheck: (
-                callback?: (status: string, details: { version: string }) => void,
-              ) => {
-                const status = 'no_update'
-                const details = { version: '' }
-                if (typeof callback === 'function') {
-                  queueMicrotask(() => callback(status, details))
-                  return
-                }
-                return Promise.resolve({ status, ...details })
-              },
-            },
-            () => injectedLastError ?? base?.lastError,
-          )
-        },
-      },
-
-      /*
-        The side panel's state, open/close and events live in the main process (api/side-panel.ts);
-        the embedder shows the panel. Every method answers in both shapes, a promise and a callback
-        with lastError, as Chrome's do.
-      */
-      sidePanel: {
-        shouldInject: () => manifest.manifest_version === 3,
-        factory: (base) => {
-          return {
-            ...base,
-            Side: { LEFT: 'left', RIGHT: 'right' },
-            getOptions: invokeExtension('sidePanel.getOptions'),
-            setOptions: invokeExtension('sidePanel.setOptions'),
-            getPanelBehavior: invokeExtension('sidePanel.getPanelBehavior'),
-            setPanelBehavior: invokeExtension('sidePanel.setPanelBehavior'),
-            getLayout: invokeExtension('sidePanel.getLayout'),
-            open: invokeExtension('sidePanel.open'),
-            close: invokeExtension('sidePanel.close'),
-            onOpened: new ExtensionEvent('sidePanel.onOpened'),
-            onClosed: new ExtensionEvent('sidePanel.onClosed'),
-          }
-        },
-      },
-
-      storage: {
-        factory: (base) => {
-          const local = base && base.local
-
-          /*
-            `managed` is the administrator's policy store. It is read-only, and on a machine with no
-            enterprise policy installed Chrome answers every read with an empty result. Electron has no
-            policy backend, so empty is not a fallback here: it is the same answer Chrome gives, and the
-            only honest one.
-
-            It used to alias `local`, which was wrong in two ways.
-
-            It handed an extension its OWN data back as administrator policy. `managed.get(null)`
-            returned the whole local store, and a password manager reads that area for vault policy —
-            measured in Rambox, Grammarly's `managed.get(null)` came back holding its alarms, its
-            cached config and the active tab's URL.
-
-            And every read took a round trip to the main process, which a caller can lose. Real
-            extensions race a policy read against a timeout — Grammarly gives it 3s — and measured
-            with the worker's event loop blocked past such a deadline, the IPC answer never arrives
-            and the timer wins, while an answer resolved in a microtask lands the instant the loop
-            frees up. There is nothing to fetch here, so this area never leaves the renderer.
-
-            (That measurement is NOT a diagnosis of Grammarly's own "Manage storage timeout" errors:
-            its `get`, copied verbatim into its own worker, resolves in 0 ms across the exact window
-            where its calls expire. This change does not stop them. See
-            docs/EXTENSION_CATALOG_HEALTH.md in the Rambox monorepo.)
-
-            `sync` still aliases `local`: it is a real read/write store, and backing it with local data
-            is what an extension expects to find in it.
-          */
-          const EMPTY_RESULT = () => ({}) as Record<string, unknown>
-
-          const managedGet = (...args: any[]) => {
-            const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
-            const keys = args[0]
-            // Chrome returns the defaults an extension passes and overrides none of them, because
-            // there is no policy to override them with. Arrays and plain keys simply find nothing.
-            const result =
-              keys && typeof keys === 'object' && !Array.isArray(keys)
-                ? { ...(keys as Record<string, unknown>) }
-                : EMPTY_RESULT()
-            if (callback) {
-              queueMicrotask(() => callback(result))
-              return
-            }
-            return Promise.resolve(result)
-          }
-
-          /*
-            Chrome exposes the write methods on the managed area and fails the call; it reports that
-            through `runtime.lastError` for a callback, which a preload cannot set, so the callback
-            form here comes back without one. The promise form — what MV3 code uses — rejects with
-            Chrome's own message.
-          */
-          const readOnly =
-            () =>
-            (...args: any[]) => {
-              const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
-              if (callback) {
-                queueMicrotask(() => callback())
-                return
-              }
-              return Promise.reject(new Error('This is a read-only store.'))
-            }
-
-          // Policy never changes while the app runs, so this event has nothing to report. Taking
-          // local's would deliver the extension's own writes as policy changes, which is the leak
-          // above in event form.
-          const inertOnChanged = {
-            addListener: () => {},
-            removeListener: () => {},
-            hasListener: () => false,
-            hasListeners: () => false,
-          }
-
-          const managed = {
-            get: managedGet,
-            getKeys: localStub([]),
-            getBytesInUse: localStub(0),
-            set: readOnly(),
-            remove: readOnly(),
-            clear: readOnly(),
-            onChanged: inertOnChanged,
-          }
-
-          /*
-            `sync` aliases `local`, with the constants Chrome puts on the sync area. The alias used
-            to be the local object itself, whose constants are local's (QUOTA_BYTES alone), so
-            `sync.MAX_ITEMS` and `sync.QUOTA_BYTES_PER_ITEM` read undefined: LanguageTool 11.5.0
-            splits its dictionary into chunks sized by them, and a NaN chunk size keeps one chunk.
-            Methods stay bound to local, which is where the data lives.
-          */
           const sync: any = {}
           if (localArea) {
             for (const key of Object.keys(localArea)) {
@@ -2121,6 +1921,11 @@ export const injectExtensionAPIs = () => {
 
           return {
             ...base,
+            ...(localArea ? { local: localArea } : {}),
+            ...(sessionArea ? { session: sessionArea } : {}),
+            ...(workerEvents
+              ? { onChanged: workerEvents.makeEvent('any', (base as any).onChanged) }
+              : {}),
             managed,
             sync,
           }
@@ -3144,20 +2949,9 @@ export const injectExtensionAPIs = () => {
     // correct sender.tab.active value.
     if (extensionId) activeTabCache.init()
 
-    // Replace the broken native WebSocket in service-worker contexts only.
-    // Pages keep the working native implementation. ProxyWebSocket closes over
-    // `electron`, so it keeps working after the global reference is removed
-    // below.
     const isServiceWorker =
       typeof (self as any).ServiceWorkerGlobalScope !== 'undefined' &&
       (self as any) instanceof (self as any).ServiceWorkerGlobalScope
-    if (isServiceWorker && extensionId) {
-      try {
-        ;(globalThis as any).WebSocket = ProxyWebSocket
-      } catch (error) {
-        console.error('Failed to install WebSocket proxy', error)
-      }
-    }
 
     // Repair chrome.webRequest's event objects on Electron 43.
     // Upstream Electron 43.0.0 regression (reproduced with a minimal repro —
