@@ -78,6 +78,9 @@ export class BrowserActionAPI {
   private actionMap = new Map</* extensionId */ string, ExtensionActionStore>()
   private popup?: PopupView
 
+  /** Asked first on an action click; answering true means it handled the click (the side panel). */
+  actionClickInterceptor?: (extensionId: string, tab: Electron.WebContents) => boolean
+
   private observers: Set<Electron.WebContents> = new Set()
   private queuedUpdate: boolean = false
 
@@ -464,6 +467,12 @@ export class BrowserActionAPI {
     if (!tab) {
       throw new Error(`Unable to get active tab`)
     }
+
+    // Chrome: with openPanelOnActionClick and a panel enabled for the tab, the click toggles the side
+    // panel, and neither the popup nor onClicked runs (measured with Extensions.triggerAction on
+    // Chromium 147). The click is a user gesture either way.
+    this.ctx.store.noteUserGesture(extensionId)
+    if (this.actionClickInterceptor?.(extensionId, tab)) return
 
     const popupUrl = this.getPopupUrl(extensionId, tab.id)
 

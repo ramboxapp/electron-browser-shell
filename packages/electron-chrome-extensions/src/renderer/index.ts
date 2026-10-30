@@ -1653,18 +1653,26 @@ export const injectExtensionAPIs = () => {
         },
       },
 
-      // There's no side panel UI in Electron; stubbed so MV3 extensions that
-      // probe for the API don't crash.
+      /*
+        The side panel's state, open/close and events live in the main process (api/side-panel.ts);
+        the embedder shows the panel. Every method answers in both shapes, a promise and a callback
+        with lastError, as Chrome's do.
+      */
       sidePanel: {
         shouldInject: () => manifest.manifest_version === 3,
         factory: (base) => {
           return {
             ...base,
-            getOptions: localStub({ enabled: false }),
-            setOptions: localStub(),
-            getPanelBehavior: localStub({ openPanelOnActionClick: false }),
-            setPanelBehavior: localStub(),
-            open: localStub(),
+            Side: { LEFT: 'left', RIGHT: 'right' },
+            getOptions: invokeExtension('sidePanel.getOptions'),
+            setOptions: invokeExtension('sidePanel.setOptions'),
+            getPanelBehavior: invokeExtension('sidePanel.getPanelBehavior'),
+            setPanelBehavior: invokeExtension('sidePanel.setPanelBehavior'),
+            getLayout: invokeExtension('sidePanel.getLayout'),
+            open: invokeExtension('sidePanel.open'),
+            close: invokeExtension('sidePanel.close'),
+            onOpened: new ExtensionEvent('sidePanel.onOpened'),
+            onClosed: new ExtensionEvent('sidePanel.onClosed'),
           }
         },
       },

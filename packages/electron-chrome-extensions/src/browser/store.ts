@@ -36,6 +36,20 @@ export class ExtensionStore extends EventEmitter {
   extensionContextTypes = new WeakMap<Electron.WebContents, 'POPUP' | 'OFFSCREEN_DOCUMENT'>()
 
   /**
+   * Whether a webContents is the embedder's view of an extension's open side panel, reported as
+   * SIDE_PANEL by `runtime.getContexts()`. Set by the sidePanel API.
+   */
+  isSidePanelContents: (wc: Electron.WebContents, extensionId: string) => boolean = () => false
+
+  /**
+   * A user-initiated event reached an extension (action click, context menu, command, notification):
+   * what lets it call `sidePanel.open()`, as Chrome's user gesture does.
+   */
+  noteUserGesture(extensionId: string) {
+    this.emit('user-gesture', extensionId)
+  }
+
+  /**
    * The type a window was created with through `windows.create` (`'popup'` for a popup or a panel,
    * as Chrome reports both). Windows the embedder registers itself are `'normal'`.
    */

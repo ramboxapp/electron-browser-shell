@@ -449,6 +449,7 @@ export class ContextMenusAPI {
       srcUrl: params?.srcURL,
     }
 
+    this.ctx.store.noteUserGesture(extensionId)
     this.ctx.router.sendEvent(extensionId, 'contextMenus.onClicked', data, tab)
   }
 }

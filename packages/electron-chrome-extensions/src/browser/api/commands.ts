@@ -122,6 +122,7 @@ export class CommandsAPI {
     const declared = this.commandMap.get(extensionId)
     if (!declared?.some((entry) => entry.name === command)) return false
     if (command === '_execute_action' || command === '_execute_browser_action') return false
+    this.ctx.store.noteUserGesture(extensionId)
     this.ctx.router.sendEvent(extensionId, 'commands.onCommand', command, tab)
     return true
   }

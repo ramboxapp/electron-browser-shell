@@ -142,7 +142,7 @@ export class RuntimeAPI extends EventEmitter {
 
   /**
    * The extension's documents for `runtime.getContexts()`: every one of its pages open in this
-   * session, as OFFSCREEN_DOCUMENT, POPUP or TAB. The BACKGROUND entry is not here — Electron's own
+   * session, as OFFSCREEN_DOCUMENT, POPUP, SIDE_PANEL or TAB. The BACKGROUND entry is not here — Electron's own
    * binding answers that one, with its real id, and the preload joins both lists and applies the
    * filter.
    */
@@ -161,7 +161,9 @@ export class RuntimeAPI extends EventEmitter {
       if (!url.startsWith(`${origin}/`)) continue
       if (url.includes('_generated_background_page.html')) continue
 
-      const contextType = this.ctx.store.extensionContextTypes.get(wc) || 'TAB'
+      const contextType =
+        this.ctx.store.extensionContextTypes.get(wc) ||
+        (this.ctx.store.isSidePanelContents(wc, extension.id) ? 'SIDE_PANEL' : 'TAB')
       let contextId = this.contextIds.get(wc)
       if (!contextId) {
         contextId = randomUUID()

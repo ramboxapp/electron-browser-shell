@@ -131,6 +131,7 @@ export class NotificationsAPI {
     this.registry.set(notificationId, notification)
 
     notification.on('click', () => {
+      this.ctx.store.noteUserGesture(extension.id)
       this.ctx.router.sendEvent(extension.id, 'notifications.onClicked', id)
     })
 

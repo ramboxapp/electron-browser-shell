@@ -31,6 +31,7 @@ import { BrowsingDataAPI } from './api/browsing-data'
 import { InstanceIDAPI } from './api/instance-id'
 import { PageCaptureAPI } from './api/page-capture'
 import { SystemAPI } from './api/system'
+import { SidePanelAPI, SidePanelShowDetails } from './api/side-panel'
 import { resolvePartition } from './partition'
 
 function checkVersion() {
@@ -75,6 +76,8 @@ function resolvePreloadPath(modulePath?: string) {
   // Fallback to preload relative to entrypoint directory
   return path.join(__dirname, preloadFilename)
 }
+
+export type { SidePanelShowDetails, SidePanelHideDetails } from './api/side-panel'
 
 export interface ChromeExtensionOptions extends ChromeExtensionImpl {
   /**
@@ -159,6 +162,7 @@ export class ElectronChromeExtensions extends EventEmitter {
     pageCapture: PageCaptureAPI
     permissions: PermissionsAPI
     runtime: RuntimeAPI
+    sidePanel: SidePanelAPI
     system: SystemAPI
     tabs: TabsAPI
     webNavigation: WebNavigationAPI
@@ -207,12 +211,16 @@ export class ElectronChromeExtensions extends EventEmitter {
       pageCapture: new PageCaptureAPI(this.ctx),
       permissions: new PermissionsAPI(this.ctx),
       runtime: new RuntimeAPI(this.ctx),
+      sidePanel: new SidePanelAPI(this.ctx),
       system: new SystemAPI(this.ctx),
       tabs: new TabsAPI(this.ctx),
       webNavigation: new WebNavigationAPI(this.ctx),
       webSocket: new WebSocketAPI(this.ctx),
       windows: new WindowsAPI(this.ctx),
     }
+
+    this.api.browserAction.actionClickInterceptor = (extensionId, tab) =>
+      this.api.sidePanel.handleActionClick(extensionId, tab)
 
     this.listenForExtensions()
     this.prependPreload(opts.modulePath)
@@ -326,6 +334,20 @@ export class ElectronChromeExtensions extends EventEmitter {
   removeTab(tab: Electron.WebContents) {
     this.checkWebContentsArgument(tab)
     this.ctx.store.removeTab(tab)
+  }
+
+  /**
+   * The user closed the side panel the embedder shows (its close button): closes it as
+   * `sidePanel.close({windowId})` does, with `sidePanel.onClosed`. The library tells the embedder what
+   * to show through the `'side-panel-show'` and `'side-panel-hide'` events.
+   */
+  closeSidePanel(windowId?: number) {
+    this.api.sidePanel.closeFromEmbedder(windowId)
+  }
+
+  /** What the side panel of a window shows now (the last `'side-panel-show'`), or undefined. */
+  getSidePanel(windowId?: number): SidePanelShowDetails | undefined {
+    return this.api.sidePanel.getShown(windowId)
   }
 
   /** Notify extension system that the active tab has changed. */

@@ -8,6 +8,9 @@
   "background": {
     "service_worker": "background.js"
   },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
   "content_scripts": [
     {
       "matches": [
@@ -85,7 +88,8 @@
     "identity",
     "management",
     "gcm",
-    "proxy"
+    "proxy",
+    "sidePanel"
   ],
   "optional_permissions": [
     "clipboardRead",
