@@ -3045,6 +3045,13 @@ export const injectExtensionAPIs = () => {
       (prefs say the rulesets are remembered) and deferring it were both tried and change nothing:
       the extension's own enable breaks the dynamic ruleset the same way. The fix is Electron's.
       See docs/EXTENSION_CATALOG_HEALTH.md in the Rambox monorepo for the measurements.
+
+      NOT REPRODUCED on 30/10/2026 (44.9.3+wvcus, this library at stage 4): uBlock in the bench, a
+      fresh profile and two more launches of it, keeps its persisted dynamic rules and every update
+      resolves, after this call and its own; a probe extension with a static ruleset does the same on
+      44.9.3 and 43; and in Rambox uBlock's "Allow ads on this site" (a dynamic rule) survives a
+      restart of the app. So no workaround here; if it comes back, the plan's one (persist dynamic
+      rules in session-state.ts and replay them as session rules) is still the way.
     */
     if (isServiceWorker && extensionId) {
       const dnr = (chrome as any).declarativeNetRequest
