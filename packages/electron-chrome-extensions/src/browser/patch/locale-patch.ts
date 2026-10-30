@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import debug from 'debug'
-import { CRX_I18N_KEY, CrxI18nPayload } from '../../shared/i18n-format'
+import { CRX_I18N_KEY, CrxI18nPayload, formatExtensionMessage } from '../../shared/i18n-format'
 
 const d = debug('electron-chrome-extensions:locale-patch')
 
@@ -29,7 +29,10 @@ const d = debug('electron-chrome-extensions:locale-patch')
  *
  * Returns true when it changed the manifest, for logging and for tests.
  */
-export async function patchExtensionLocale(extensionPath: string, locale: string): Promise<boolean> {
+export async function patchExtensionLocale(
+  extensionPath: string,
+  locale: string,
+): Promise<boolean> {
   try {
     return await patchExtensionLocaleUnsafe(extensionPath, locale)
   } catch (error) {
@@ -117,8 +120,74 @@ export async function resolveExtensionMessages(
   return merged
 }
 
+/**
+ * Where the patch keeps the original values of the manifest fields it localized, so the next run —
+ * in another language, or with none — starts again from the `__MSG_x__` placeholders and not from
+ * the previous language's text.
+ */
+export const CRX_I18N_MANIFEST_KEY = 'crx_i18n_manifest'
+
+/** The manifest fields Chrome localizes, as paths: Chromium's extension_l10n_util list, the parts an extension here can have. */
+const localizableFields = (manifest: any): string[][] => [
+  ['name'],
+  ['short_name'],
+  ['description'],
+  ['action', 'default_title'],
+  ['browser_action', 'default_title'],
+  ['page_action', 'default_title'],
+  ['omnibox', 'keyword'],
+  ...Object.keys(
+    manifest.commands && typeof manifest.commands === 'object' ? manifest.commands : {},
+  ).map((command) => ['commands', command, 'description']),
+]
+
+const readPath = (object: any, keys: string[]) =>
+  keys.reduce((value, key) => (value && typeof value === 'object' ? value[key] : undefined), object)
+
+const writePath = (object: any, keys: string[], value: unknown) => {
+  const parent = readPath(object, keys.slice(0, -1))
+  if (parent && typeof parent === 'object') parent[keys[keys.length - 1]] = value
+}
+
+/*
+  The manifest's own `__MSG_x__` strings — the extension's name, its description, its action title,
+  its command descriptions — in the app's language. Chromium localizes them at load with the same
+  locale it uses for getMessage, which Electron leaves at `en` (see above), so a Spanish app showed
+  the extension's English name and tooltip even once getMessage answered in Spanish. They are
+  replaced here with the resolved bundle, and the originals are kept under CRX_I18N_MANIFEST_KEY.
+  A name the bundle does not have stays a placeholder, for Chromium to resolve as it did.
+*/
+const localizeManifest = (manifest: any, payload: CrxI18nPayload | undefined) => {
+  const originals = manifest[CRX_I18N_MANIFEST_KEY]
+  if (Array.isArray(originals)) {
+    for (const [keys, value] of originals) {
+      if (Array.isArray(keys)) writePath(manifest, keys, value)
+    }
+  }
+  delete manifest[CRX_I18N_MANIFEST_KEY]
+  if (!payload) return
+
+  const state = { ...payload, extensionId: '' }
+  const kept: Array<[string[], string]> = []
+  for (const keys of localizableFields(manifest)) {
+    const value = readPath(manifest, keys)
+    if (typeof value !== 'string' || !value.includes('__MSG_')) continue
+    const localized = value.replace(/__MSG_([A-Za-z0-9_@]+)__/g, (placeholder, name: string) => {
+      const message = formatExtensionMessage(state, name)
+      return message || placeholder
+    })
+    if (localized === value) continue
+    writePath(manifest, keys, localized)
+    kept.push([keys, value])
+  }
+  if (kept.length) manifest[CRX_I18N_MANIFEST_KEY] = kept
+}
+
 /** `es_ES` and `es-ES` both read as `es-ES`, the form `i18n.getUILanguage()` answers with. */
-const toBcp47 = (locale: string) => String(locale || '').trim().replace(/_/g, '-')
+const toBcp47 = (locale: string) =>
+  String(locale || '')
+    .trim()
+    .replace(/_/g, '-')
 
 async function patchExtensionLocaleUnsafe(extensionPath: string, locale: string): Promise<boolean> {
   const manifestPath = path.join(extensionPath, 'manifest.json')
@@ -135,13 +204,21 @@ async function patchExtensionLocaleUnsafe(extensionPath: string, locale: string)
     ? await resolveExtensionMessages(extensionPath, bcp47, manifest.default_locale)
     : undefined
   const next: CrxI18nPayload | undefined = messages ? { locale: bcp47, messages } : undefined
-  const previous = manifest[CRX_I18N_KEY]
+  const before = JSON.stringify(manifest)
 
-  if (JSON.stringify(previous ?? null) === JSON.stringify(next ?? null)) return false
-
+  localizeManifest(manifest, next)
+  // Always last, after the originals localizeManifest may have re-added: the same content in the
+  // same key order, so an unchanged locale compares equal and the file is not rewritten.
+  delete manifest[CRX_I18N_KEY]
   if (next) manifest[CRX_I18N_KEY] = next
-  else delete manifest[CRX_I18N_KEY]
+
+  if (JSON.stringify(manifest) === before) return false
   await fs.writeFile(manifestPath, JSON.stringify(manifest), 'utf-8')
-  d(`wrote %s messages for %s (%d keys)`, bcp47, extensionPath, next ? Object.keys(next.messages).length : 0)
+  d(
+    `wrote %s messages for %s (%d keys)`,
+    bcp47,
+    extensionPath,
+    next ? Object.keys(next.messages).length : 0,
+  )
   return true
 }

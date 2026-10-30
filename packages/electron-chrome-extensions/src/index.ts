@@ -19,5 +19,6 @@ export {
   patchExtensionLocale,
   localeCandidates,
   resolveExtensionMessages,
+  CRX_I18N_MANIFEST_KEY,
 } from './browser/patch/locale-patch'
 export { formatExtensionMessage, CRX_I18N_KEY } from './shared/i18n-format'

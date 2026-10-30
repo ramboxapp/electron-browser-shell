@@ -10,6 +10,7 @@ import {
   resolveExtensionMessages,
   formatExtensionMessage,
   CRX_I18N_KEY,
+  CRX_I18N_MANIFEST_KEY,
 } from '../'
 import { useExtensionBrowser, useServer } from './hooks'
 
@@ -56,9 +57,13 @@ describe('locale patch', () => {
       expect(formatExtensionMessage(state(), 'greeting', ['Ana', '3'])).to.equal(
         'Hola Ana, tenés 3 mensajes',
       )
-      expect(formatExtensionMessage(state(), 'positional', ['a', 'b'])).to.equal('First a, second b')
+      expect(formatExtensionMessage(state(), 'positional', ['a', 'b'])).to.equal(
+        'First a, second b',
+      )
       // A single string is one substitution; a missing one is empty.
-      expect(formatExtensionMessage(state(), 'greeting', 'Ana')).to.equal('Hola Ana, tenés  mensajes')
+      expect(formatExtensionMessage(state(), 'greeting', 'Ana')).to.equal(
+        'Hola Ana, tenés  mensajes',
+      )
     })
 
     it('matches message names case-insensitively, as Chrome does', () => {
@@ -74,7 +79,9 @@ describe('locale patch', () => {
 
     it('escapes < in the message only with escapeLt', () => {
       expect(formatExtensionMessage(state(), 'with_lt')).to.equal('a < b')
-      expect(formatExtensionMessage(state(), 'with_lt', [], { escapeLt: true })).to.equal('a &lt; b')
+      expect(formatExtensionMessage(state(), 'with_lt', [], { escapeLt: true })).to.equal(
+        'a &lt; b',
+      )
       expect(formatExtensionMessage(state(), 'nested', ['<b>'], { escapeLt: true })).to.equal(
         'Says: <b>',
       )
@@ -92,7 +99,18 @@ describe('locale patch', () => {
 
     it('refuses more than nine substitutions, as Chrome does', () => {
       expect(() =>
-        formatExtensionMessage(state(), 'positional', ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10']),
+        formatExtensionMessage(state(), 'positional', [
+          '1',
+          '2',
+          '3',
+          '4',
+          '5',
+          '6',
+          '7',
+          '8',
+          '9',
+          '10',
+        ]),
       ).to.throw(/at most 9/)
     })
   })
@@ -156,6 +174,43 @@ describe('locale patch', () => {
       await fs.writeFile(messagesPath, '﻿' + (await fs.readFile(messagesPath, 'utf-8')))
       expect(await patchExtensionLocale(dir, 'es')).to.be.true
       expect((await readManifest())[CRX_I18N_KEY].messages.tagline.message).to.equal('From es')
+    })
+
+    /*
+      Chromium localizes the manifest's own __MSG_x__ strings in the locale Electron leaves at en, so
+      the name and the action title stayed English in a Spanish app. The patch writes them in the
+      app's language and keeps the placeholders, so the next language starts from them again.
+    */
+    it('localizes the manifest fields Chrome localizes, and keeps the placeholders', async () => {
+      const manifestPath = path.join(dir, 'manifest.json')
+      const original = await readManifest()
+      original.name = '__MSG_tagline__'
+      original.description = 'Plain text'
+      original.action = { ...original.action, default_title: '__MSG_only_in_en__ (__MSG_nope__)' }
+      original.commands.lock_vault.description = '__MSG_tagline__'
+      await fs.writeFile(manifestPath, JSON.stringify(original))
+
+      expect(await patchExtensionLocale(dir, 'es-AR')).to.be.true
+      let manifest = await readManifest()
+      expect(manifest.name).to.equal('From es_AR')
+      expect(manifest.description).to.equal('Plain text')
+      // A name the bundle lacks stays a placeholder, for Chromium to resolve.
+      expect(manifest.action.default_title).to.equal('English only (__MSG_nope__)')
+      expect(manifest.commands.lock_vault.description).to.equal('From es_AR')
+      expect(await patchExtensionLocale(dir, 'es-AR')).to.be.false
+
+      expect(await patchExtensionLocale(dir, 'en-US')).to.be.true
+      manifest = await readManifest()
+      expect(manifest.name).to.equal('From en')
+
+      // No bundle anymore: the placeholders come back as they were.
+      delete manifest.default_locale
+      await fs.writeFile(manifestPath, JSON.stringify(manifest))
+      expect(await patchExtensionLocale(dir, 'es-AR')).to.be.true
+      manifest = await readManifest()
+      expect(manifest.name).to.equal('__MSG_tagline__')
+      expect(manifest.action.default_title).to.equal('__MSG_only_in_en__ (__MSG_nope__)')
+      expect(manifest[CRX_I18N_MANIFEST_KEY]).to.equal(undefined)
     })
 
     it('never throws on a nonexistent path', async () => {
@@ -222,7 +277,7 @@ describe('locale patch', () => {
     const server = useServer()
     const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc-mv3' })
 
-    it('keeps Electron\'s default-locale answers', async () => {
+    it("keeps Electron's default-locale answers", async () => {
       const result: any = await browser.crx.raw({ type: 'i18n-shapes' })
       expect(result.greeting).to.equal('Hello Ana, you have 3 new messages')
       expect(result.tagline).to.equal('From en')
