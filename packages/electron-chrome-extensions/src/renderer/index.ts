@@ -1274,6 +1274,18 @@ export const injectExtensionAPIs = () => {
             onClicked: new ExtensionEvent('notifications.onClicked'),
             onButtonClicked: new ExtensionEvent('notifications.onButtonClicked'),
             onClosed: new ExtensionEvent('notifications.onClosed'),
+            // The permission is granted for as long as the extension is loaded, and there is no
+            // notification settings page to show, so these two never fire.
+            onPermissionLevelChanged: new ExtensionEvent('notifications.onPermissionLevelChanged'),
+            onShowSettings: new ExtensionEvent('notifications.onShowSettings'),
+            // Chrome's enums (Chromium 147), read at the top of a worker to build create() options.
+            PermissionLevel: { GRANTED: 'granted', DENIED: 'denied' } as any,
+            TemplateType: {
+              BASIC: 'basic',
+              IMAGE: 'image',
+              LIST: 'list',
+              PROGRESS: 'progress',
+            } as any,
           }
         },
       },

@@ -58,3 +58,28 @@ describe('chrome.notifications', () => {
     })
   })
 })
+
+// The enums and events Chrome has on the namespace (Chromium 147), read where a worker starts.
+describe('chrome.notifications surface', () => {
+  const server = useServer()
+  const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc-mv3' })
+
+  it("has Chrome's enums and events, and answers the permission level", async () => {
+    const result = await browser.crx.raw({ type: 'notifications-surface' })
+    expect(result.PermissionLevel).to.deep.equal({ DENIED: 'denied', GRANTED: 'granted' })
+    expect(result.TemplateType).to.deep.equal({
+      BASIC: 'basic',
+      IMAGE: 'image',
+      LIST: 'list',
+      PROGRESS: 'progress',
+    })
+    expect(result.events).to.deep.equal({
+      onButtonClicked: 'function',
+      onClicked: 'function',
+      onClosed: 'function',
+      onPermissionLevelChanged: 'function',
+      onShowSettings: 'function',
+    })
+    expect(result.permissionLevel).to.equal('granted')
+  })
+})
