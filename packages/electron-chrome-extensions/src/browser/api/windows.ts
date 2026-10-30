@@ -19,8 +19,7 @@ export class WindowsAPI {
   constructor(private ctx: ExtensionContext) {
     const handle = this.ctx.router.apiHandler()
     handle('windows.get', this.get.bind(this))
-    // TODO: how does getCurrent differ from getLastFocused?
-    handle('windows.getCurrent', this.getLastFocused.bind(this))
+    handle('windows.getCurrent', this.getCurrent.bind(this))
     handle('windows.getLastFocused', this.getLastFocused.bind(this))
     handle('windows.getAll', this.getAll.bind(this))
     handle('windows.create', this.create.bind(this))
@@ -68,10 +67,13 @@ export class WindowsAPI {
         .map((tab) => this.ctx.store.tabDetailsCache.get(tab.id) as chrome.tabs.Tab)
         .filter(Boolean),
       incognito: !this.ctx.session.isPersistent(),
-      type: 'normal', // TODO
+      // 'popup' for a window an extension opened as one, 'normal' for the rest.
+      type: this.ctx.store.getWindowType(win),
       state: getWindowState(win),
       alwaysOnTop: win.isAlwaysOnTop(),
-      sessionId: 'default', // TODO
+      // No `sessionId`: Chrome only gives one to a window chrome.sessions can restore, and there are
+      // none here. It used to be 'default' on every window, a field Chrome never sends (measured in
+      // Edge 156 and Chromium 147: ten fields, this was the eleventh).
     }
 
     this.ctx.store.windowDetailsCache.set(win.id, details)
@@ -106,10 +108,35 @@ export class WindowsAPI {
     }
   }
 
+  /*
+    A window that is not there fails with Chrome's message. It used to answer `{ id: -1 }`, written
+    when a failure in the main process could not reach the extension as a rejection (it came back
+    `undefined`); now that it does, the honest answer is Chrome's. `WINDOW_ID_CURRENT` keeps the
+    fallback getLastFocused documents, since Chrome always has a current window to give.
+  */
   private get(event: ExtensionEvent, windowId: number, queryOptions?: chrome.windows.QueryOptions) {
+    if (windowId === WindowsAPI.WINDOW_ID_CURRENT) return this.getCurrent(event, queryOptions)
     const win = this.getWindowFromId(windowId)
-    if (!win) return { id: WindowsAPI.WINDOW_ID_NONE }
+    if (!win) throw new Error(`No window with id: ${windowId}.`)
     return this.getWindowDetails(win, queryOptions)
+  }
+
+  private windowOrThrow(windowId: number) {
+    const win = this.getWindowFromId(windowId)
+    if (!win || win.isDestroyed()) throw new Error(`No window with id: ${windowId}.`)
+    return win
+  }
+
+  /**
+   * The window the calling code runs in: for a page that is a tab, that tab's window; for anything
+   * else (the worker, a popup), the last focused one — which is what Chrome answers there too.
+   */
+  private getCurrent(event: ExtensionEvent, queryOptions?: chrome.windows.QueryOptions) {
+    if (event.type === 'frame' && this.ctx.store.tabs.has(event.sender)) {
+      const win = this.ctx.store.tabToWindow.get(event.sender)
+      if (win && !win.isDestroyed()) return this.getWindowDetails(win, queryOptions)
+    }
+    return this.getLastFocused(event, queryOptions)
   }
 
   /**
@@ -136,8 +163,13 @@ export class WindowsAPI {
     return this.getWindowDetails(win, queryOptions)
   }
 
+  /** `windowTypes` filters by the type each window reports; without it Chrome lists every type here. */
   private getAll(event: ExtensionEvent, queryOptions?: chrome.windows.QueryOptions) {
-    return Array.from(this.ctx.store.windows).map((win) => this.getWindowDetails(win, queryOptions))
+    const types = Array.isArray(queryOptions?.windowTypes) ? queryOptions!.windowTypes : undefined
+    return Array.from(this.ctx.store.windows)
+      .filter((win) => !win.isDestroyed())
+      .filter((win) => !types || types.includes(this.ctx.store.getWindowType(win)))
+      .map((win) => this.getWindowDetails(win, queryOptions))
   }
 
   /*
@@ -172,6 +204,10 @@ export class WindowsAPI {
     // worker went idle — wake it before the consumer's createWindow() runs.
     await wakeExtensionServiceWorker(this.ctx.session, event.extension.id)
     const win = await this.ctx.store.createWindow(event, { ...details, url })
+    // Chrome reports a panel as a popup.
+    if (details.type === 'popup' || details.type === 'panel') {
+      this.ctx.store.windowTypes.set(win.id, 'popup')
+    }
     return this.getWindowDetails(win, { populate: true })
   }
 
@@ -187,10 +223,30 @@ export class WindowsAPI {
     windowId: number,
     updateProperties: chrome.windows.UpdateInfo = {},
   ) {
-    const win = this.getWindowFromId(windowId)
-    if (!win || win.isDestroyed()) return
+    const win = this.windowOrThrow(windowId)
 
     const props = updateProperties
+
+    /*
+      Combinations Chrome refuses before touching the window, all with this one message (measured in
+      Chromium 147): a bounds change on a minimized, maximized or fullscreen window, focusing a
+      window that is being minimized, and unfocusing one that is being maximized or made fullscreen.
+    */
+    const hasBounds = ['left', 'top', 'width', 'height'].some(
+      (key) => typeof (props as any)[key] === 'number',
+    )
+    const exclusiveState =
+      props.state === 'minimized' ||
+      props.state === 'maximized' ||
+      props.state === 'fullscreen' ||
+      (props.state as string) === 'locked-fullscreen'
+    if (
+      (exclusiveState && hasBounds) ||
+      (props.state === 'minimized' && props.focused === true) ||
+      ((props.state === 'maximized' || props.state === 'fullscreen') && props.focused === false)
+    ) {
+      throw new Error('Invalid value for state')
+    }
 
     if (props.state) {
       switch (props.state) {
@@ -236,12 +292,12 @@ export class WindowsAPI {
       ;(win as Electron.BrowserWindow).flashFrame(props.drawAttention)
     }
 
-    return this.createWindowDetails(win)
+    // Without `tabs`, as Chrome answers update (measured in Chromium 147).
+    return this.getWindowDetails(win)
   }
 
   private async remove(event: ExtensionEvent, windowId: number = WindowsAPI.WINDOW_ID_CURRENT) {
-    const win = this.getWindowFromId(windowId)
-    if (!win) return
+    const win = this.windowOrThrow(windowId)
     const removedWindowId = win.id
     await this.ctx.store.removeWindow(win)
     this.onRemoved(removedWindowId)

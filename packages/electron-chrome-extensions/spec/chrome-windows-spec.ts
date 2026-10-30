@@ -155,7 +155,11 @@ describe('chrome.windows', () => {
     it('makes the window the last focused one with focused: true', async () => {
       const other = new BrowserWindow({
         show: false,
-        webPreferences: { session: browser.session, nodeIntegration: false, contextIsolation: true },
+        webPreferences: {
+          session: browser.session,
+          nodeIntegration: false,
+          contextIsolation: true,
+        },
       })
       browser.extensions.addTab(other.webContents, other)
       try {
@@ -165,11 +169,6 @@ describe('chrome.windows', () => {
       } finally {
         other.destroy()
       }
-    })
-
-    it('answers nothing for a window that is gone', async () => {
-      const result = await browser.crx.exec('windows.update', 987654, { focused: true })
-      expect(result).to.equal(null)
     })
   })
 })
@@ -191,7 +190,11 @@ describe('chrome.windows.create()', () => {
       opened.push(String(details.url))
       const win = new BrowserWindow({
         show: false,
-        webPreferences: { session: browser.session, nodeIntegration: false, contextIsolation: true },
+        webPreferences: {
+          session: browser.session,
+          nodeIntegration: false,
+          contextIsolation: true,
+        },
       })
       created.push(win)
       await win.loadURL(String(details.url))
@@ -221,5 +224,87 @@ describe('chrome.windows.create()', () => {
     const result = await browser.crx.exec('windows.create', { url: 'chrome://settings' })
     expect(result).to.equal(null)
     expect(opened).to.deep.equal([])
+  })
+})
+
+/*
+  What the rest of chrome.windows answers, against Chromium 147 and Edge 156: the Window object's
+  ten fields, the windowTypes filter, Chrome's message for a window that is not there, and the
+  state/bounds combinations Chrome refuses.
+*/
+describe('chrome.windows, as Chrome answers', () => {
+  const server = useServer()
+  const created: Electron.BrowserWindow[] = []
+  const browser = useExtensionBrowser({
+    url: server.getUrl,
+    extensionName: 'rpc-mv3',
+    async createWindow(details) {
+      const win = new BrowserWindow({
+        show: false,
+        webPreferences: {
+          session: browser.session,
+          nodeIntegration: false,
+          contextIsolation: true,
+        },
+      })
+      created.push(win)
+      await win.loadURL(String(details.url))
+      return win
+    },
+  })
+  const outcome = (method: string, ...args: any[]): Promise<any> =>
+    browser.crx.raw({ type: 'outcome', method, args })
+
+  afterEach(() => {
+    for (const win of created.splice(0)) if (!win.isDestroyed()) win.destroy()
+  })
+
+  it("has Chrome's ten fields and no sessionId", async () => {
+    const { value } = await outcome('windows.get', browser.window.id)
+    expect(Object.keys(value).sort()).to.deep.equal([
+      'alwaysOnTop',
+      'focused',
+      'height',
+      'id',
+      'incognito',
+      'left',
+      'state',
+      'top',
+      'type',
+      'width',
+    ])
+  })
+
+  it('filters getAll by windowTypes, and reports a popup it opened as one', async () => {
+    expect((await outcome('windows.getAll', { windowTypes: ['normal'] })).value).to.have.length(1)
+    expect((await outcome('windows.getAll', { windowTypes: ['popup'] })).value).to.deep.equal([])
+    const popup = await outcome('windows.create', { url: server.getUrl(), type: 'popup' })
+    expect(popup.value.type).to.equal('popup')
+    const popups = (await outcome('windows.getAll', { windowTypes: ['popup'] })).value
+    expect(popups.map((win: any) => win.id)).to.deep.equal([popup.value.id])
+  })
+
+  it("fails for a window that is not there, with Chrome's message", async () => {
+    const gone = { error: 'No window with id: 987654.' }
+    expect(await outcome('windows.get', 987654)).to.deep.equal(gone)
+    expect(await outcome('windows.update', 987654, { focused: true })).to.deep.equal(gone)
+    expect(await outcome('windows.remove', 987654)).to.deep.equal(gone)
+  })
+
+  it('refuses the state combinations Chrome refuses, and answers update without tabs', async () => {
+    const id = browser.window.id
+    const invalid = { error: 'Invalid value for state' }
+    expect(await outcome('windows.update', id, { state: 'minimized', width: 500 })).to.deep.equal(
+      invalid,
+    )
+    expect(
+      await outcome('windows.update', id, { state: 'minimized', focused: true }),
+    ).to.deep.equal(invalid)
+    expect(
+      await outcome('windows.update', id, { state: 'maximized', focused: false }),
+    ).to.deep.equal(invalid)
+    const { value } = await outcome('windows.update', id, { drawAttention: false })
+    expect(value.id).to.equal(id)
+    expect(value).to.not.have.property('tabs')
   })
 })
