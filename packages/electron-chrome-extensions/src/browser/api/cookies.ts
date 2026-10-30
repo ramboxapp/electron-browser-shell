@@ -1,13 +1,24 @@
 import { ExtensionContext } from '../context'
 import { ExtensionEvent } from '../router'
+import { patternsCover } from './lib/match-patterns'
 
 enum CookieStoreID {
   Default = '0',
   Incognito = '1',
 }
 
+/*
+  Electron's causes in Chrome's words. Electron 44 reports a new cookie as 'inserted' (and has
+  'unknown-deletion' and two 'inserted-no-...-overwrite' causes), none of which chrome.cookies has:
+  Chrome reports a cookie a page or an extension set as 'explicit' (measured in Chromium 147, for
+  the same document.cookie write that Electron 44.9.3 reported as 'inserted').
+*/
 const onChangedCauseTranslation: { [key: string]: string } = {
   'expired-overwrite': 'expired_overwrite',
+  inserted: 'explicit',
+  'inserted-no-change-overwrite': 'explicit',
+  'inserted-no-value-change-overwrite': 'explicit',
+  'unknown-deletion': 'explicit',
 }
 
 const createCookieDetails = (cookie: Electron.Cookie): chrome.cookies.Cookie => ({
@@ -20,6 +31,30 @@ const createCookieDetails = (cookie: Electron.Cookie): chrome.cookies.Cookie => 
   secure: Boolean(cookie.secure),
   storeId: CookieStoreID.Default,
 })
+
+/**
+ * The URL Chrome checks a cookie's host permission against: the cookie's domain without its leading
+ * dot, over https only when the cookie is secure. So a non-secure cookie on example.com needs
+ * `http://example.com/*` (or `*://`), and `https://example.com/*` alone does not cover it —
+ * measured in Chromium 147, where such an extension sees none of that site's cookies.
+ */
+const cookieUrl = (cookie: Electron.Cookie) =>
+  `${cookie.secure ? 'https' : 'http'}://${(cookie.domain || '').replace(/^\./, '')}/`
+
+/** The host patterns a manifest grants: MV3 lists them apart, MV2 mixes them into `permissions`. */
+const hostPatternsOf = (extension: Electron.Extension): string[] => {
+  const manifest: chrome.runtime.Manifest = extension.manifest || {}
+  const mixed = ((manifest.permissions as string[]) || []).filter(
+    (permission) => permission === '<all_urls>' || permission.includes('://'),
+  )
+  const patterns =
+    manifest.manifest_version === 3 ? [...(manifest.host_permissions || []), ...mixed] : mixed
+  // A host permission is about the host: its path is ignored, as Chrome ignores it.
+  return patterns.map((pattern) => pattern.replace(/^([^:]+:\/\/[^/]*)\/.*$/, '$1/*'))
+}
+
+const mayAccessCookie = (extension: Electron.Extension, cookie: Electron.Cookie) =>
+  patternsCover(hostPatternsOf(extension), [cookieUrl(cookie)])
 
 export class CookiesAPI {
   private get cookies() {
@@ -67,7 +102,10 @@ export class CookiesAPI {
       session: details.session,
     })
 
-    return cookies.map(createCookieDetails)
+    // Only the cookies of hosts the extension may access, as Chrome filters getAll.
+    return cookies
+      .filter((cookie) => mayAccessCookie(event.extension, cookie))
+      .map(createCookieDetails)
   }
 
   private async set(
@@ -110,6 +148,17 @@ export class CookiesAPI {
       removed,
     }
 
-    this.ctx.router.broadcastEvent('cookies.onChanged', changeInfo)
+    /*
+      To each extension whose host permissions cover the cookie, and to no other: Chrome does not
+      tell an extension about a cookie it could not read (measured in Chromium 147, a cookie set on a
+      host the extension has no permission for fires nothing there). This was a broadcast, so every
+      extension with the cookies permission saw every cookie of every site.
+    */
+    const sessionExtensions = this.ctx.session.extensions || this.ctx.session
+    for (const extension of sessionExtensions.getAllExtensions()) {
+      if (mayAccessCookie(extension, cookie)) {
+        this.ctx.router.sendEvent(extension.id, 'cookies.onChanged', changeInfo)
+      }
+    }
   }
 }
