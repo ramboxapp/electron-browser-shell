@@ -601,6 +601,17 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       break
     }
 
+    case 'font-settings-enums': {
+      const f = chrome.fontSettings
+      reply({
+        GenericFamily: f.GenericFamily,
+        LevelOfControl: f.LevelOfControl,
+        scriptCodes: Object.keys(f.ScriptCode).length,
+        ZYYY: f.ScriptCode.ZYYY,
+      })
+      break
+    }
+
     case 'notifications-surface': {
       const n = chrome.notifications
       const events = {}

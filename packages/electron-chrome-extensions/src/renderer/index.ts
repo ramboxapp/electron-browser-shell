@@ -1,6 +1,11 @@
 import { ipcRenderer, contextBridge, webFrame } from 'electron'
 import { addExtensionListener, removeExtensionListener, hasExtensionListeners } from './event'
 import { formatExtensionMessage, CrxI18nPayload, CrxI18nState } from '../shared/i18n-format'
+import {
+  fontSettingsSchemaError,
+  GENERIC_FAMILIES,
+  SCRIPT_CODES,
+} from '../shared/font-settings-schema'
 
 export const injectExtensionAPIs = () => {
   interface ExtensionMessageOptions {
@@ -214,6 +219,9 @@ export const injectExtensionAPIs = () => {
     closeWebSocket,
     i18nInit,
     i18nGetMessage,
+    // chrome.fontSettings' schema, which the main world cannot import (see mainWorldScript).
+    fontSettingsSchemaError,
+    fontSettingsEnums: () => ({ genericFamilies: GENERIC_FAMILIES, scriptCodes: SCRIPT_CODES }),
   }
 
   // Function body to run in the main world.
@@ -1025,33 +1033,75 @@ export const injectExtensionAPIs = () => {
         },
       },
 
-      // Font settings aren't configurable in Electron, so this is a local
-      // stub which reports Chrome's default values as 'not_controllable'.
+      /*
+        chrome.fontSettings. The font list and each family's font come from the main process, which
+        reads what this Electron really has (see browser/api/font-settings.ts). Everything is
+        `not_controllable`: Electron takes the default fonts and sizes from a WebContents'
+        webPreferences when it is created and cannot change them for a running page, so a setter
+        resolves and changes nothing, and no on*Changed fires — what Chrome answers when a policy holds
+        the pref (measured in Chromium 147 on 30/10/2026: a set there would store the value per
+        extension, report `controlled_by_this_extension` and fire the event, none of which would be
+        true here). The sizes are Electron's defaults, which are Chrome's: 16, 13 and 0. Schema errors
+        reject (or set lastError) with Chrome's own text instead of throwing.
+
+        This was a local stub whose font list held three generic names that are not fonts
+        ("sans-serif", "serif", "monospace"), which is all Dark Reader's font picker showed.
+      */
       fontSettings: {
         factory: (base) => {
-          const genericFontList = [
-            { fontId: 'sans-serif', displayName: 'Sans-Serif' },
-            { fontId: 'serif', displayName: 'Serif' },
-            { fontId: 'monospace', displayName: 'Monospace' },
-          ]
+          const notControllable = 'not_controllable'
+          const local =
+            (
+              method: string,
+              required: Parameters<typeof electron.fontSettingsSchemaError>[2],
+              answer: () => any,
+            ) =>
+            (...args: any[]) => {
+              const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+              const error = electron.fontSettingsSchemaError(method, args[0], required)
+              const result = error ? undefined : answer()
+              if (callback) {
+                queueMicrotask(() =>
+                  error ? withLastError(error, () => callback()) : callback(result),
+                )
+                return
+              }
+              return error ? Promise.reject(new Error(error)) : Promise.resolve(result)
+            }
+          const size = (pixelSize: number) => () => ({
+            levelOfControl: notControllable,
+            pixelSize,
+          })
+          const enumOf = (values: string[]) =>
+            Object.fromEntries(values.map((value) => [value.toUpperCase(), value]))
+          const { genericFamilies, scriptCodes } = electron.fontSettingsEnums()
           return {
             ...base,
-            clearDefaultFixedFontSize: localStub(),
-            clearDefaultFontSize: localStub(),
-            clearFont: localStub(),
-            clearMinimumFontSize: localStub(),
-            getDefaultFixedFontSize: localStub({
-              pixelSize: 13,
-              levelOfControl: 'not_controllable',
-            }),
-            getDefaultFontSize: localStub({ pixelSize: 16, levelOfControl: 'not_controllable' }),
-            getFont: localStub({ fontId: '', levelOfControl: 'not_controllable' }),
-            getFontList: localStub(genericFontList),
-            getMinimumFontSize: localStub({ pixelSize: 0, levelOfControl: 'not_controllable' }),
-            setDefaultFixedFontSize: localStub(),
-            setDefaultFontSize: localStub(),
-            setFont: localStub(),
-            setMinimumFontSize: localStub(),
+            GenericFamily: enumOf(genericFamilies),
+            LevelOfControl: enumOf([
+              'controllable_by_this_extension',
+              'controlled_by_other_extensions',
+              'controlled_by_this_extension',
+              'not_controllable',
+            ]),
+            ScriptCode: enumOf(scriptCodes),
+            getFontList: invokeExtension('fontSettings.getFontList'),
+            getFont: invokeExtension('fontSettings.getFont'),
+            getDefaultFontSize: local('getDefaultFontSize', {}, size(16)),
+            getDefaultFixedFontSize: local('getDefaultFixedFontSize', {}, size(13)),
+            getMinimumFontSize: local('getMinimumFontSize', {}, size(0)),
+            setFont: local('setFont', { genericFamily: true, fontId: true }, () => undefined),
+            setDefaultFontSize: local('setDefaultFontSize', { pixelSize: true }, () => undefined),
+            setDefaultFixedFontSize: local(
+              'setDefaultFixedFontSize',
+              { pixelSize: true },
+              () => undefined,
+            ),
+            setMinimumFontSize: local('setMinimumFontSize', { pixelSize: true }, () => undefined),
+            clearFont: local('clearFont', { genericFamily: true }, () => undefined),
+            clearDefaultFontSize: local('clearDefaultFontSize', {}, () => undefined),
+            clearDefaultFixedFontSize: local('clearDefaultFixedFontSize', {}, () => undefined),
+            clearMinimumFontSize: local('clearMinimumFontSize', {}, () => undefined),
             onDefaultFixedFontSizeChanged: new Event(),
             onDefaultFontSizeChanged: new Event(),
             onFontChanged: new Event(),
