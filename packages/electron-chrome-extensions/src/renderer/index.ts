@@ -156,7 +156,47 @@ export const injectExtensionAPIs = () => {
     callbacks: WebSocketCallbacks,
   ) => {
     const onOpen = (_e: Electron.IpcRendererEvent, payload: any) => callbacks.onOpen(payload)
+  /*
+    Whether this Electron delivers `storage.onChanged` to an extension's service worker on its own.
+
+    Measured 30/10/2026 with a bare main process (no library), a worker listening to
+    `storage.onChanged`, `storage.local.onChanged` and `storage.session.onChanged`, and a page and the
+    worker writing: 43.0.0 and 44.9.3+wvcus deliver 0 of 5 changes to the worker (the page gets 5 of
+    5); 44.10.0 and 45.1.0 stock deliver 5 of 5. The fix is electron/electron#55146 (the native
+    event router was bound to frames only), backported to 44 in 44.10.0. Below that, the library
+    relays the changes itself (see the `storage` definition in mainWorldScript and
+    src/browser/api/storage.ts). `chrome-storage-onChanged-spec.ts` measures the binary it runs on
+    against this answer, so a binary that disagrees fails the suite instead of duplicating or
+    dropping events. ELECTRON_CHROME_EXTENSIONS_STORAGE_RELAY=0|1 overrides it.
+  */
+  const workerStorageEventsAreNative = (): boolean => {
+    const override = process.env.ELECTRON_CHROME_EXTENSIONS_STORAGE_RELAY
+    if (override === '0') return true
+    if (override === '1') return false
+    const [major, minor] = String(process.versions.electron || '')
+      .split('.')
+      .map((part) => parseInt(part, 10))
+    if (!Number.isFinite(major)) return false
+    if (major >= 46) return true
+    if (major === 45) return minor >= 1
+    if (major === 44) return minor >= 10
+    return false
+  }
+
+  /*
+    A storage write this context made, for the main process to deliver to the extension's worker.
+    Not through invokeExtension on purpose: that one logs every call with its arguments in
+    development, and these arguments are the stored values — a password manager's vault state.
+  */
+  const reportStorageChanges = (extensionId: string, areaName: string, changes: object) => {
+    ipcRenderer
+      .invoke('crx-msg', extensionId, 'storage.reportChanges', areaName, changes)
+      .catch(() => {})
+  }
+
     const onMessage = (_e: Electron.IpcRendererEvent, payload: any) => callbacks.onMessage(payload)
+    storageChangeRelay: !workerStorageEventsAreNative(),
+    reportStorageChanges,
     const onClose = (_e: Electron.IpcRendererEvent, payload: any) => callbacks.onClose(payload)
     const onError = () => callbacks.onError()
     ipcRenderer.on(`crx-websocket-open-${connectionId}`, onOpen)
@@ -1625,6 +1665,237 @@ export const injectExtensionAPIs = () => {
                   ['contextIds', 'contextId'],
                   ['tabIds', 'tabId'],
                   ['windowIds', 'windowId'],
+          /*
+            `storage.onChanged` for the service worker, on an Electron that does not deliver it there
+            (43 and 44 below 44.10, measured; see workerStorageEventsAreNative in the isolated world).
+
+            Chrome tells every context of an extension about every change to its storage, the
+            worker included, and extensions rely on that to keep the worker in step with what the
+            popup or the options page changed: Google Translate's worker keeps the target language
+            in memory and only learns a new one from this event; SafeInCloud's worker keeps a cache
+            of the whole local area fed by it, and clears the current account when the popup logs
+            out; RoboForm re-reads its options, HubSpot reinitialises on a portal change. Without
+            it, a setting changed in the popup does not reach the worker until the worker restarts.
+
+            So every extension context that can write (pages, popups, offscreen documents and the
+            worker itself; not content scripts, whose world the preload cannot reach) reports each
+            write it made to the main process, as Chrome would report it: the keys whose value
+            actually changed, with `oldValue` and `newValue` read before and after the write. The
+            main process re-emits it to the worker only (src/browser/api/storage.ts). Pages are left
+            alone: they already get the native event.
+
+            A patch with an end date. It turns itself off on a binary that delivers natively (the
+            gate), and in the worker the first native delivery switches the relay off for the rest
+            of the worker's life, so a binary the gate misjudges duplicates one change at most.
+          */
+          // Only with a native area to wrap: a context without the `storage` permission has none, and
+          // reading `.onChanged` off it would fail the whole namespace.
+          const relayEnabled =
+            !!local &&
+            !!electron.storageChangeRelay &&
+            !!extensionId &&
+            manifest.manifest_version === 3 &&
+            !!(manifest as any).background?.service_worker
+          const inWorker =
+            typeof (globalThis as any).ServiceWorkerGlobalScope !== 'undefined' &&
+            globalThis instanceof (globalThis as any).ServiceWorkerGlobalScope
+
+          const AREA_METHODS = [
+            'get',
+            'getBytesInUse',
+            'getKeys',
+            'set',
+            'remove',
+            'clear',
+            'setAccessLevel',
+          ]
+          const AREA_CONSTANTS = [
+            'QUOTA_BYTES',
+            'QUOTA_BYTES_PER_ITEM',
+            'MAX_ITEMS',
+            'MAX_WRITE_OPERATIONS_PER_HOUR',
+            'MAX_WRITE_OPERATIONS_PER_MINUTE',
+            'MAX_SUSTAINED_WRITE_OPERATIONS_PER_MINUTE',
+          ]
+          // A plain copy of a native area: own members, plus the methods and constants that live on
+          // its prototype (Object.keys does not list them), bound to the native area.
+          const copyArea = (area: any) => {
+            const copy: any = {}
+            for (const key of Object.keys(area)) {
+              const member = area[key]
+              copy[key] = typeof member === 'function' ? member.bind(area) : member
+            }
+            for (const name of AREA_METHODS) {
+              const member = area[name]
+              if (typeof member === 'function' && !copy[name]) copy[name] = member.bind(area)
+            }
+            for (const name of AREA_CONSTANTS) {
+              if (copy[name] === undefined && area[name] !== undefined) copy[name] = area[name]
+            }
+            if (!copy.onChanged && area.onChanged) copy.onChanged = area.onChanged
+            return copy
+          }
+
+          // Chrome compares stored values, not identities: a set that writes what is already there
+          // reports nothing. Key order does not make two objects different.
+          const stableJson = (value: unknown): string =>
+            JSON.stringify(value, (_key, inner) =>
+              inner && typeof inner === 'object' && !Array.isArray(inner)
+                ? Object.keys(inner)
+                    .sort()
+                    .reduce((sorted: any, key) => ((sorted[key] = inner[key]), sorted), {})
+                : inner,
+            )
+          const diff = (keys: string[], before: any, after: any) => {
+            const changes: Record<string, { oldValue?: unknown; newValue?: unknown }> = {}
+            for (const key of keys) {
+              const had = Object.prototype.hasOwnProperty.call(before, key)
+              const has = Object.prototype.hasOwnProperty.call(after, key)
+              if (!had && !has) continue
+              if (had && has && stableJson(before[key]) === stableJson(after[key])) continue
+              const change: { oldValue?: unknown; newValue?: unknown } = {}
+              if (had) change.oldValue = before[key]
+              if (has) change.newValue = after[key]
+              changes[key] = change
+            }
+            return changes
+          }
+
+          // One write at a time per context, so the value read before a write is the one the
+          // previous write left, not one it is about to replace.
+          let writeQueue: Promise<unknown> = Promise.resolve()
+          const reportingArea = (native: any, areaName: 'local' | 'session') => {
+            const area = copyArea(native)
+            const write =
+              (method: 'set' | 'remove' | 'clear', keysOf: (args: any[]) => string[] | null) =>
+              (...args: any[]) => {
+                const callback =
+                  typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+                // A call the schema refuses goes straight to the native method, which throws it
+                // synchronously with Chrome's message, as it did before this wrapper.
+                const malformed =
+                  (method === 'set' &&
+                    (!args[0] || typeof args[0] !== 'object' || Array.isArray(args[0]))) ||
+                  (method === 'remove' && typeof args[0] !== 'string' && !Array.isArray(args[0]))
+                if (malformed) return native[method](...args, ...(callback ? [callback] : []))
+                const run = async () => {
+                  const keys = keysOf(args)
+                  const before = await native.get(keys)
+                  await native[method](...args)
+                  const after = method === 'clear' ? {} : await native.get(keys)
+                  const changes = diff(keys ?? Object.keys(before || {}), before || {}, after || {})
+                  if (Object.keys(changes).length > 0) {
+                    electron.reportStorageChanges(extensionId, areaName, changes)
+                  }
+                }
+                const promise = writeQueue.then(run, run)
+                writeQueue = promise.catch(() => {})
+                if (!callback) return promise
+                promise.then(
+                  () => callback(),
+                  (error) => withLastError(errorMessage(error), () => callback()),
+                )
+              }
+            area.set = write('set', (args) =>
+              args[0] && typeof args[0] === 'object' ? Object.keys(args[0]) : [],
+            )
+            area.remove = write('remove', (args) =>
+              Array.isArray(args[0]) ? args[0].map(String) : [String(args[0])],
+            )
+            area.clear = write('clear', () => null)
+            return area
+          }
+
+          /*
+            The worker's events: one listener set per event, fed by the native event (if it ever
+            fires) and by the relay. The relay listener is registered with the main process on the
+            first addListener, as Chrome only wakes a worker for an event it listens to.
+          */
+          const workerEvents = (() => {
+            if (!relayEnabled || !inWorker) return undefined
+            let nativeDelivers = false
+            let relayRegistered = false
+            const sets = {
+              any: new Set<Function>(),
+              local: new Set<Function>(),
+              session: new Set<Function>(),
+            }
+            const clone = (value: unknown) => JSON.parse(JSON.stringify(value))
+            const dispatch = (changes: object, areaName: string) => {
+              for (const listener of Array.from(sets.any)) {
+                try {
+                  listener(clone(changes), areaName)
+                } catch (error) {
+                  console.error(error)
+                }
+              }
+              const perArea = (sets as any)[areaName] as Set<Function> | undefined
+              for (const listener of Array.from(perArea || [])) {
+                try {
+                  listener(clone(changes))
+                } catch (error) {
+                  console.error(error)
+                }
+              }
+            }
+            const onRelayed = (changes: object, areaName: string) => {
+              if (nativeDelivers) return
+              dispatch(changes, areaName)
+            }
+            const makeEvent = (which: 'any' | 'local' | 'session', nativeEvent: any) => {
+              let nativeHooked = false
+              return {
+                addListener(listener: Function) {
+                  if (typeof listener !== 'function') return
+                  sets[which].add(listener)
+                  if (!nativeHooked && nativeEvent?.addListener) {
+                    nativeHooked = true
+                    // A binary that does deliver here: from now on it is the only source.
+                    nativeEvent.addListener((...args: any[]) => {
+                      nativeDelivers = true
+                      for (const own of Array.from(sets[which])) {
+                        try {
+                          own(...args)
+                        } catch (error) {
+                          console.error(error)
+                        }
+                      }
+                    })
+                  }
+                  if (!relayRegistered) {
+                    relayRegistered = true
+                    electron.addExtensionListener(extensionId, 'storage.onChanged', onRelayed)
+                  }
+                },
+                removeListener(listener: Function) {
+                  sets[which].delete(listener)
+                },
+                hasListener(listener: Function) {
+                  return sets[which].has(listener)
+                },
+                hasListeners() {
+                  return sets[which].size > 0
+                },
+              }
+            }
+            return { makeEvent }
+          })()
+
+          const localArea = local && relayEnabled ? reportingArea(local, 'local') : local
+          const sessionArea =
+            base && base.session && relayEnabled
+              ? reportingArea(base.session, 'session')
+              : base && base.session
+          if (workerEvents) {
+            if (localArea)
+              localArea.onChanged = workerEvents.makeEvent('local', (local as any).onChanged)
+            if (sessionArea)
+              sessionArea.onChanged = workerEvents.makeEvent(
+                'session',
+                (base as any).session.onChanged,
+              )
+          }
+
                   ['frameIds', 'frameId'],
                   ['documentIds', 'documentId'],
                   ['documentUrls', 'documentUrl'],
@@ -1650,6 +1921,11 @@ export const injectExtensionAPIs = () => {
                 return promise
               },
               openOptionsPage: invokeExtension('runtime.openOptionsPage'),
+            ...(localArea ? { local: localArea } : {}),
+            ...(sessionArea ? { session: sessionArea } : {}),
+            ...(workerEvents
+              ? { onChanged: workerEvents.makeEvent('any', (base as any).onChanged) }
+              : {}),
               sendNativeMessage: invokeExtension('runtime.sendNativeMessage'),
               /*
                 Electron's answer has `arch` and `os` and not `nacl_arch` (measured on 44.9.3: two
@@ -1821,26 +2097,18 @@ export const injectExtensionAPIs = () => {
             Methods stay bound to local, which is where the data lives.
           */
           const sync: any = {}
-          if (local) {
-            for (const key of Object.keys(local)) {
-              const member = (local as any)[key]
-              sync[key] = typeof member === 'function' ? member.bind(local) : member
+          if (localArea) {
+            for (const key of Object.keys(localArea)) {
+              const member = (localArea as any)[key]
+              sync[key] = typeof member === 'function' ? member.bind(localArea) : member
             }
             // Members that live on the prototype of the native area, which Object.keys does not list.
-            for (const name of [
-              'get',
-              'getBytesInUse',
-              'getKeys',
-              'set',
-              'remove',
-              'clear',
-              'setAccessLevel',
-            ]) {
-              const member = (local as any)[name]
-              if (typeof member === 'function' && !sync[name]) sync[name] = member.bind(local)
+            for (const name of AREA_METHODS) {
+              const member = (localArea as any)[name]
+              if (typeof member === 'function' && !sync[name]) sync[name] = member.bind(localArea)
             }
-            if (!sync.onChanged && (local as any).onChanged)
-              sync.onChanged = (local as any).onChanged
+            if (!sync.onChanged && (localArea as any).onChanged)
+              sync.onChanged = (localArea as any).onChanged
           }
           Object.assign(sync, {
             QUOTA_BYTES: 102400,

@@ -32,6 +32,7 @@ import { BrowsingDataAPI } from './api/browsing-data'
 import { InstanceIDAPI } from './api/instance-id'
 import { PageCaptureAPI } from './api/page-capture'
 import { SystemAPI } from './api/system'
+import { StorageAPI } from './api/storage'
 import { SidePanelAPI, SidePanelShowDetails } from './api/side-panel'
 import { resolvePartition } from './partition'
 
@@ -164,6 +165,7 @@ export class ElectronChromeExtensions extends EventEmitter {
     pageCapture: PageCaptureAPI
     permissions: PermissionsAPI
     runtime: RuntimeAPI
+    storage: StorageAPI
     sidePanel: SidePanelAPI
     system: SystemAPI
     tabs: TabsAPI
@@ -213,6 +215,7 @@ export class ElectronChromeExtensions extends EventEmitter {
       offscreen: new OffscreenAPI(this.ctx),
       pageCapture: new PageCaptureAPI(this.ctx),
       permissions: new PermissionsAPI(this.ctx),
+      storage: new StorageAPI(this.ctx),
       runtime: new RuntimeAPI(this.ctx),
       sidePanel: new SidePanelAPI(this.ctx),
       system: new SystemAPI(this.ctx),

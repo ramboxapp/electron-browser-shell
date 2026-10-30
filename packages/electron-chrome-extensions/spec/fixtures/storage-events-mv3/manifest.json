@@ -1,0 +1,9 @@
+{
+  "name": "storage-events-mv3",
+  "version": "1.0",
+  "manifest_version": 3,
+  "permissions": ["storage"],
+  "background": {
+    "service_worker": "sw.js"
+  }
+}
