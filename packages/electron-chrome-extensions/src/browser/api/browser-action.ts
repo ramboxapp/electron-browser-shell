@@ -7,6 +7,7 @@ import {
   getExtensionManifest,
   getIconPath,
   resolveExtensionPath,
+  toExtensionIconPath,
   matchSize,
   ResizeType,
 } from './common'
@@ -306,10 +307,12 @@ export class BrowserActionAPI {
 
           if (extension && iconDetails) {
             if (typeof iconDetails.path === 'string') {
-              const iconAbsPath = resolveExtensionPath(extension, iconDetails.path)
+              const iconPath = toExtensionIconPath(extension, iconDetails.path)
+              const iconAbsPath = iconPath && resolveExtensionPath(extension, iconPath)
               if (iconAbsPath) iconImage = nativeImage.createFromPath(iconAbsPath)
             } else if (typeof iconDetails.path === 'object') {
-              const imagePath = matchSize(iconDetails.path, imageSize, resizeType)
+              const sizedPath = matchSize(iconDetails.path, imageSize, resizeType)
+              const imagePath = sizedPath && toExtensionIconPath(extension, sizedPath)
               const iconAbsPath = imagePath && resolveExtensionPath(extension, imagePath)
               if (iconAbsPath) iconImage = nativeImage.createFromPath(iconAbsPath)
             } else if (typeof iconDetails.imageData === 'string') {

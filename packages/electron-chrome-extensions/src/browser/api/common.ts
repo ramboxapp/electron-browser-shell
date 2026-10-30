@@ -36,6 +36,23 @@ export const getExtensionUrl = (extension: Electron.Extension, uri: string) => {
   } catch {}
 }
 
+/*
+  An icon path as setIcon received it, reduced to a path inside the extension. Chrome resolves it
+  against the caller's URL, so an absolute URL of the extension itself is valid: HubSpot Sales and
+  Keeper pass `chrome.runtime.getURL(...)`, and joining that to the extension's folder found nothing,
+  so their toolbar button lost its icon on the first setIcon. Another origin is not an icon of this
+  extension and resolves to nothing.
+*/
+export const toExtensionIconPath = (extension: Electron.Extension, uri: string) => {
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(uri)) return uri
+  try {
+    const url = new URL(uri)
+    if (url.protocol === 'chrome-extension:' && url.hostname === extension.id) {
+      return decodeURIComponent(url.pathname)
+    }
+  } catch {}
+}
+
 export const resolveExtensionPath = (
   extension: Electron.Extension,
   uri: string,

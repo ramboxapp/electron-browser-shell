@@ -532,4 +532,50 @@ describe('chrome.browserAction', () => {
       expect([r, g, b, a]).to.deep.equal(rgba)
     })
   })
+
+  /*
+    setIcon with a path given as the extension's own absolute URL — `chrome.runtime.getURL(...)`,
+    which HubSpot Sales and Keeper both pass. Chrome resolves it; this joined the whole URL to the
+    extension's folder, found no file, and the toolbar button went blank on the first setIcon.
+  */
+  describe('setIcon with a path', () => {
+    const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc-mv3' })
+
+    const readIcon = async (size: number) => {
+      const response: Response = (browser.extensions as any).api.browserAction.handleCRXRequest(
+        new Request(`crx://extension-icon/${browser.extension.id}/${size}/2?t=${Date.now()}`),
+      )
+      if (response.status !== 200) return { status: response.status }
+      const image = nativeImage.createFromBuffer(Buffer.from(await response.arrayBuffer()))
+      const [b, g, r, a] = Array.from(image.toBitmap().subarray(0, 4))
+      return { status: response.status, size: image.getSize(), rgba: [r, g, b, a] }
+    }
+    // The colour icon16.png is filled with.
+    const fixtureIcon = { status: 200, size: { width: 16, height: 16 }, rgba: [20, 160, 90, 255] }
+
+    for (const [label, makePath] of [
+      ['relative', () => 'icon16.png'],
+      ['root-relative', () => '/icon16.png'],
+      ['full chrome-extension://', () => `chrome-extension://${browser.extension.id}/icon16.png`],
+    ] as const) {
+      it(`serves the file for a ${label} path, as a string and as a size map`, async () => {
+        ElectronChromeExtensions.handleCRXProtocol(browser.session)
+        await browser.crx.exec('action.setIcon', { path: makePath() })
+        expect(await readIcon(16)).to.deep.equal(fixtureIcon)
+        await browser.crx.exec('action.setIcon', { path: { 16: makePath(), 32: makePath() } })
+        expect(await readIcon(32)).to.deep.equal(fixtureIcon)
+      })
+    }
+
+    it('serves nothing for a URL of another extension or origin', async () => {
+      ElectronChromeExtensions.handleCRXProtocol(browser.session)
+      for (const path of [
+        'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/icon16.png',
+        `${server.getUrl()}/icon16.png`,
+      ]) {
+        await browser.crx.exec('action.setIcon', { path })
+        expect((await readIcon(16)).status, path).to.equal(400)
+      }
+    })
+  })
 })
