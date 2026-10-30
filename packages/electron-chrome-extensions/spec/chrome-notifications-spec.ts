@@ -1,3 +1,4 @@
+import { Notification } from 'electron'
 import { expect } from 'chai'
 
 import { useExtensionBrowser, useServer } from './hooks'
@@ -81,5 +82,108 @@ describe('chrome.notifications surface', () => {
       onShowSettings: 'function',
     })
     expect(result.permissionLevel).to.equal('granted')
+  })
+})
+
+/*
+  Buttons, ids and the booleans of clear/update, as Chromium 147 answers them (measured 30/10/2026):
+  `buttons` become the native notification's actions (two at most; three resolve with two shown), a
+  click on one fires onButtonClicked(id, index), a button without a title fails with Chrome's schema
+  error, an id-less create gets a fresh UUID each time, and clear/update resolve whether the
+  notification existed. The buttons were dropped before, so onButtonClicked never fired.
+
+  No toast is shown: Notification.prototype.show is replaced for the duration, and a click on a
+  button is the 'action' event Electron emits for it.
+*/
+describe('chrome.notifications buttons', () => {
+  const server = useServer()
+  const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc-mv3' })
+  const icon =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
+  const options = { type: 'basic', iconUrl: icon, title: 'title', message: 'message', silent: true }
+
+  let shown: Notification[] = []
+  let originalShow: () => void
+  before(() => {
+    originalShow = Notification.prototype.show
+    Notification.prototype.show = function (this: Notification) {
+      shown.push(this)
+    }
+  })
+  after(() => {
+    Notification.prototype.show = originalShow
+  })
+  beforeEach(() => {
+    shown = []
+  })
+
+  const outcome = (method: string, ...args: any[]) =>
+    browser.crx.raw({ type: 'outcome', method, args })
+
+  it('shows two buttons at most, and fires onButtonClicked with the index clicked', async () => {
+    await browser.crx.raw({ type: 'record-events', names: ['notifications.onButtonClicked'] })
+    const { value: id } = await outcome('notifications.create', 'with-buttons', {
+      ...options,
+      buttons: [{ title: 'One' }, { title: 'Two' }, { title: 'Three' }],
+    })
+    expect(id).to.equal('with-buttons')
+    expect(shown).to.have.lengthOf(1)
+    expect(shown[0].actions).to.deep.equal([
+      { type: 'button', text: 'One' },
+      { type: 'button', text: 'Two' },
+    ])
+
+    shown[0].emit('action', { actionIndex: 1, selectionIndex: -1 }, 1)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const events = await browser.crx.raw({
+      type: 'recorded',
+      name: 'notifications.onButtonClicked',
+    })
+    expect(events).to.deep.equal([['with-buttons', 1]])
+    await outcome('notifications.clear', 'with-buttons')
+  })
+
+  it('fires nothing for a notification without buttons', async () => {
+    await browser.crx.raw({ type: 'record-events', names: ['notifications.onButtonClicked'] })
+    await outcome('notifications.create', 'no-buttons', options)
+    expect(shown[0].actions).to.deep.equal([])
+    shown[0].emit('action', { actionIndex: 0, selectionIndex: -1 }, 0)
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const events = await browser.crx.raw({
+      type: 'recorded',
+      name: 'notifications.onButtonClicked',
+    })
+    expect(events).to.deep.equal([])
+    await outcome('notifications.clear', 'no-buttons')
+  })
+
+  it("rejects a button without a title with Chrome's schema error", async () => {
+    const { error } = await outcome('notifications.create', 'bad-button', {
+      ...options,
+      buttons: [{}],
+    })
+    expect(error).to.equal(
+      "Error in invocation of notifications.create(optional string notificationId, notifications.NotificationOptions options, optional function callback): Error at parameter 'options': Error at property 'buttons': Error at index 0: Missing required property 'title'.",
+    )
+    expect(shown).to.have.lengthOf(0)
+  })
+
+  it('gives each notification without an id a fresh UUID', async () => {
+    const first = (await outcome('notifications.create', options)).value
+    const second = (await outcome('notifications.create', options)).value
+    expect(first).to.match(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+    expect(second).to.not.equal(first)
+    const { value: all } = await outcome('notifications.getAll')
+    expect(Object.keys(all).sort()).to.deep.equal([first, second].sort())
+    await outcome('notifications.clear', first)
+    await outcome('notifications.clear', second)
+  })
+
+  it('resolves whether there was a notification to clear or update', async () => {
+    await outcome('notifications.create', 'exists', options)
+    expect((await outcome('notifications.update', 'exists', { title: 'x' })).value).to.equal(true)
+    expect((await outcome('notifications.update', 'missing', { title: 'x' })).value).to.equal(false)
+    expect((await outcome('notifications.clear', 'exists')).value).to.equal(true)
+    expect((await outcome('notifications.clear', 'missing')).value).to.equal(false)
   })
 })

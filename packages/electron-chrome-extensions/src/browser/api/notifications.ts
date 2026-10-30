@@ -1,4 +1,5 @@
 import { app, Extension, Notification } from 'electron'
+import { randomUUID } from 'node:crypto'
 import { ExtensionContext } from '../context'
 import { ExtensionEvent } from '../router'
 import { validateExtensionResource } from './common'
@@ -66,11 +67,14 @@ export class NotificationsAPI {
     })
   }
 
+  /** Chrome resolves whether there was a notification to clear (measured in Chromium 147). */
   private clear = ({ extension }: ExtensionEvent, id: string) => {
     const notificationId = createScopedIdentifier(extension, id)
-    if (this.registry.has(notificationId)) {
-      this.registry.get(notificationId)?.close()
-    }
+    const notification = this.registry.get(notificationId)
+    notification?.close()
+    // A notification that never reached the screen emits no 'close': forget it here as well.
+    this.registry.delete(notificationId)
+    return !!notification
   }
 
   private create = async ({ extension }: ExtensionEvent, arg1: unknown, arg2?: unknown) => {
@@ -78,7 +82,9 @@ export class NotificationsAPI {
     let opts: chrome.notifications.NotificationOptions
 
     if (typeof arg1 === 'object') {
-      id = 'guid' // TODO: generate uuid
+      // A fresh UUID per notification, as Chromium 147 generates. This was the constant 'guid', so a
+      // second notification without an id replaced the first one.
+      id = randomUUID()
       opts = arg1 as chrome.notifications.NotificationOptions
     } else if (typeof arg1 === 'string') {
       id = arg1
@@ -89,6 +95,14 @@ export class NotificationsAPI {
 
     if (typeof opts !== 'object' || !opts.type || !opts.iconUrl || !opts.title || !opts.message) {
       throw new Error('Missing required notification options')
+    }
+
+    const buttons = Array.isArray(opts.buttons) ? opts.buttons : []
+    const untitled = buttons.findIndex((button) => !button || typeof button.title !== 'string')
+    if (untitled !== -1) {
+      throw new Error(
+        `Error in invocation of notifications.create(optional string notificationId, notifications.NotificationOptions options, optional function callback): Error at parameter 'options': Error at property 'buttons': Error at index ${untitled}: Missing required property 'title'.`,
+      )
     }
 
     const notificationId = createScopedIdentifier(extension, id)
@@ -116,9 +130,25 @@ export class NotificationsAPI {
       }
     }
 
-    // TODO: buttons, template types
+    /*
+      Buttons as the notification's actions. Chrome shows at most two and accepts more without an
+      error (measured in Chromium 147: three resolve), so the rest are dropped here too. Electron
+      renders `button` actions on Windows (in the toast) and macOS; elsewhere they are ignored and
+      the notification shows without them, which is what Chrome does on a platform without buttons.
+      A button's `iconUrl` has no counterpart in a native notification.
+
+      Until now the buttons were dropped, so onButtonClicked never fired. Grammarly is the one in
+      the catalog that needs it: after an update across a major version it shows "Grammarly needs
+      to be reloaded" with a "Reload" button, and only the button (not the body) reloads the tabs.
+    */
+    const actions: Electron.NotificationAction[] = buttons
+      .slice(0, 2)
+      .map((button) => ({ type: 'button', text: button.title }))
+
+    // TODO: template types
 
     const notification = new Notification({
+      actions,
       title: opts.title,
       subtitle: app.name,
       body: getBody(opts),
@@ -135,10 +165,22 @@ export class NotificationsAPI {
       this.ctx.router.sendEvent(extension.id, 'notifications.onClicked', id)
     })
 
+    // Electron 44 passes the index in the details object; 43 passes it as the second argument.
+    notification.on('action', (details: any, legacyIndex?: number) => {
+      const buttonIndex =
+        typeof details?.actionIndex === 'number' ? details.actionIndex : legacyIndex
+      if (typeof buttonIndex !== 'number' || buttonIndex < 0 || buttonIndex >= actions.length) {
+        return
+      }
+      this.ctx.store.noteUserGesture(extension.id)
+      this.ctx.router.sendEvent(extension.id, 'notifications.onButtonClicked', id, buttonIndex)
+    })
+
     notification.once('close', () => {
       const byUser = true // TODO
       this.ctx.router.sendEvent(extension.id, 'notifications.onClosed', id, byUser)
-      this.registry.delete(notificationId)
+      // Only if it is still this one: a create with the same id replaces it before it closes.
+      if (this.registry.get(notificationId) === notification) this.registry.delete(notificationId)
     })
 
     notification.show()
@@ -181,5 +223,8 @@ export class NotificationsAPI {
 
     if (opts.priority) notification.urgency = getUrgency(opts.priority)
     if (opts.silent) notification.silent = opts.silent
+    // Chrome resolves true for a notification that exists (measured in Chromium 147); this resolved
+    // nothing.
+    return true
   }
 }
