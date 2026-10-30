@@ -29,6 +29,49 @@ function isValidConfig(config: any): config is NativeConfig {
   )
 }
 
+type RegistryReader = (
+  hive: string,
+  path: string,
+  key?: string,
+  view?: 32 | 64,
+) => Promise<string | null>
+
+/*
+  Where Chrome looks on Windows (native_process_launcher_win.cc, FindManifest): HKEY_CURRENT_USER
+  first, then HKEY_LOCAL_MACHINE, and in each the 32-bit registry view before the 64-bit one.
+
+  This used to read HKLM then HKCU, each in the 64-bit view only — `reg` from a 64-bit app reads its
+  own view — so a host whose 32-bit installer wrote HKLM\Software\WOW6432Node\Google\Chrome\… was
+  "not found". Measured on a Windows 11 machine on 30/10/2026: OneDrive's
+  `com.microsoft.onedrive.nucleus.auth.provider`, Chrome Remote Desktop's three hosts and Acrobat's
+  `com.adobe.acrobat.chrome_webcapture` are registered in that view only. HKCU\Software is shared
+  between the views on Windows 7 and later, so asking both there costs a lookup and finds the same.
+*/
+export const WINDOWS_HOST_LOOKUP_ORDER: ReadonlyArray<{ hive: 'HKCU' | 'HKLM'; view: 32 | 64 }> = [
+  { hive: 'HKCU', view: 32 },
+  { hive: 'HKCU', view: 64 },
+  { hive: 'HKLM', view: 32 },
+  { hive: 'HKLM', view: 64 },
+]
+
+/** The manifest paths the registry names for a host, in Chrome's order and without repeats. */
+export async function windowsManifestPaths(
+  application: string,
+  read: RegistryReader = readRegistryKey,
+): Promise<string[]> {
+  const results = await Promise.allSettled(
+    WINDOWS_HOST_LOOKUP_ORDER.map(({ hive, view }) =>
+      read(hive, `Software\\Google\\Chrome\\NativeMessagingHosts\\${application}`, undefined, view),
+    ),
+  )
+  const paths: string[] = []
+  for (const result of results) {
+    const value = result.status === 'fulfilled' ? result.value : undefined
+    if (value && !paths.includes(value)) paths.push(value)
+  }
+  return paths
+}
+
 async function getConfigSearchPaths(application: string) {
   const appJson = `${application}.json`
   let searchPaths: string[]
@@ -56,14 +99,7 @@ async function getConfigSearchPaths(application: string) {
       ]
       break
     case 'win32': {
-      searchPaths = (
-        await Promise.allSettled([
-          readRegistryKey('HKLM', `Software\\Google\\Chrome\\NativeMessagingHosts\\${application}`),
-          readRegistryKey('HKCU', `Software\\Google\\Chrome\\NativeMessagingHosts\\${application}`),
-        ])
-      )
-        .map((result) => (result.status === 'fulfilled' ? result.value : undefined))
-        .filter(Boolean) as string[]
+      searchPaths = await windowsManifestPaths(application)
       break
     }
     default:

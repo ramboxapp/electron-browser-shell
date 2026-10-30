@@ -3,14 +3,25 @@ import debug from 'debug'
 
 const d = debug('electron-chrome-extensions:winreg')
 
-export function readRegistryKey(hive: string, path: string, key?: string) {
+/**
+ * Reads a registry value with `reg query`. `view` picks the registry view the way Win32's
+ * KEY_WOW64_32KEY / KEY_WOW64_64KEY do (`reg`'s `/reg:32` and `/reg:64`); without it, `reg` reads the
+ * view of its own bitness, which from a 64-bit app is the 64-bit one — so a key a 32-bit installer
+ * wrote (HKLM\Software\WOW6432Node\…) is invisible unless the 32-bit view is asked for.
+ */
+export function readRegistryKey(hive: string, path: string, key?: string, view?: 32 | 64) {
   if (process.platform !== 'win32') {
     return Promise.reject('Unsupported platform')
   }
 
   return new Promise<string | null>((resolve, reject) => {
     // '/ve' explicitly queries the default value when no key name is given.
-    const args = ['query', `${hive}\\${path}`, ...(key ? ['/v', key] : ['/ve'])]
+    const args = [
+      'query',
+      `${hive}\\${path}`,
+      ...(key ? ['/v', key] : ['/ve']),
+      ...(view ? [`/reg:${view}`] : []),
+    ]
     d('reg %s', args.join(' '))
     const child = spawn('reg', args)
 
