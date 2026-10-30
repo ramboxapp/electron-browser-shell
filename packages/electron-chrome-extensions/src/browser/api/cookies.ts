@@ -56,6 +56,29 @@ const hostPatternsOf = (extension: Electron.Extension): string[] => {
 const mayAccessCookie = (extension: Electron.Extension, cookie: Electron.Cookie) =>
   patternsCover(hostPatternsOf(extension), [cookieUrl(cookie)])
 
+/**
+ * The `url` of a get/set/remove, checked as Chrome checks it (measured in Chromium 147 on 30/10/2026):
+ * against the URL the extension passed, with its own scheme, and not against the cookie. So with
+ * `https://example.com/*` alone, `get({url: 'http://example.com/'})` fails while
+ * `get({url: 'https://example.com/'})` returns even a non-secure cookie. An unparseable URL fails
+ * first, with its own message. Both fail the promise and set `lastError` for a callback, which then
+ * receives nothing. The message quotes the parsed URL (Chrome's `GURL::spec()`), not the raw string.
+ */
+const checkCookieUrl = (extension: Electron.Extension, url: unknown): string => {
+  let parsed: URL
+  try {
+    parsed = new URL(String(url))
+  } catch {
+    throw new Error(`Invalid url: "${url}".`)
+  }
+  // A match pattern without a port covers every port: compare the host alone.
+  const hostUrl = `${parsed.protocol}//${parsed.hostname}/`
+  if (!patternsCover(hostPatternsOf(extension), [hostUrl])) {
+    throw new Error(`No host permissions for cookies at url: "${parsed.href}".`)
+  }
+  return parsed.href
+}
+
 export class CookiesAPI {
   private get cookies() {
     return this.ctx.session.cookies
@@ -76,6 +99,7 @@ export class CookiesAPI {
     event: ExtensionEvent,
     details: chrome.cookies.CookieDetails,
   ): Promise<chrome.cookies.Cookie | null> {
+    checkCookieUrl(event.extension, details?.url)
     // TODO: storeId
     const cookies = await this.cookies.get({
       url: details.url,
@@ -112,6 +136,7 @@ export class CookiesAPI {
     event: ExtensionEvent,
     details: chrome.cookies.SetDetails,
   ): Promise<chrome.cookies.Cookie | null> {
+    checkCookieUrl(event.extension, details?.url)
     await this.cookies.set(details)
     const cookies = await this.cookies.get(details)
     return cookies.length > 0 ? createCookieDetails(cookies[0]) : null
@@ -121,12 +146,14 @@ export class CookiesAPI {
     event: ExtensionEvent,
     details: chrome.cookies.CookieDetails,
   ): Promise<chrome.cookies.CookieDetails | null> {
+    checkCookieUrl(event.extension, details?.url)
     try {
       await this.cookies.remove(details.url, details.name)
     } catch {
       return null
     }
-    return details
+    // Chrome answers `{name, storeId, url}`, also for a cookie that was not there.
+    return { name: details.name, storeId: CookieStoreID.Default, url: details.url }
   }
 
   private async getAllCookieStores(event: ExtensionEvent): Promise<chrome.cookies.CookieStore[]> {

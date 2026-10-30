@@ -65,4 +65,80 @@ describe('chrome.cookies and host permissions', () => {
     })
     expect(value.map((cookie: any) => cookie.name)).to.deep.equal(['covered'])
   })
+
+  /*
+    get, set and remove check the URL the extension passes, with its own scheme (measured in
+    Chromium 147 on 30/10/2026): without a host permission for it they fail with "No host permissions
+    for cookies at url", the promise rejects and a callback gets nothing with that `lastError`. An
+    unparseable URL fails first with "Invalid url". These three were not filtered at all.
+  */
+  describe('get, set and remove without a host permission', () => {
+    const noPermission = 'No host permissions for cookies at url: "http://uncovered.invalid/".'
+
+    for (const [method, details] of [
+      ['cookies.get', { url: 'http://uncovered.invalid/', name: 'other' }],
+      ['cookies.set', { url: 'http://uncovered.invalid/', name: 'other', value: '2' }],
+      ['cookies.remove', { url: 'http://uncovered.invalid/', name: 'other' }],
+    ] as const) {
+      it(`${method} rejects, and its callback gets nothing with lastError`, async () => {
+        await browser.session.cookies.set({
+          url: 'http://uncovered.invalid/',
+          name: 'other',
+          value: '1',
+        })
+        const promised = await browser.crx.raw({ type: 'outcome', method, args: [details] })
+        expect(promised).to.deep.equal({ error: noPermission })
+        const called = await browser.crx.raw({
+          type: 'outcome-callback',
+          method,
+          args: [details],
+        })
+        expect(called).to.deep.equal({ value: '__undefined__', lastError: noPermission })
+        // And the cookie the extension could not touch is untouched.
+        const [cookie] = await browser.session.cookies.get({
+          url: 'http://uncovered.invalid/',
+          name: 'other',
+        })
+        expect(cookie.value).to.equal('1')
+      })
+    }
+
+    it('checks the scheme of the URL passed, not the cookie', async () => {
+      const { error } = await browser.crx.raw({
+        type: 'outcome',
+        method: 'cookies.get',
+        args: [{ url: 'https://127.0.0.1/', name: 'covered' }],
+      })
+      expect(error).to.equal('No host permissions for cookies at url: "https://127.0.0.1/".')
+    })
+
+    it('fails an unparseable URL with "Invalid url"', async () => {
+      const { error } = await browser.crx.raw({
+        type: 'outcome',
+        method: 'cookies.remove',
+        args: [{ url: 'not a url', name: 'covered' }],
+      })
+      expect(error).to.equal('Invalid url: "not a url".')
+    })
+
+    it('answers a covered host as before, on any port, and remove with {name, storeId, url}', async () => {
+      await browser.session.cookies.set({ url: 'http://127.0.0.1/', name: 'covered', value: '1' })
+      const got = await browser.crx.raw({
+        type: 'outcome',
+        method: 'cookies.get',
+        args: [{ url: 'http://127.0.0.1:8123/', name: 'covered' }],
+      })
+      expect(got.value.name).to.equal('covered')
+      const removed = await browser.crx.raw({
+        type: 'outcome',
+        method: 'cookies.remove',
+        args: [{ url: 'http://127.0.0.1/', name: 'covered' }],
+      })
+      expect(removed.value).to.deep.equal({
+        name: 'covered',
+        storeId: '0',
+        url: 'http://127.0.0.1/',
+      })
+    })
+  })
 })
