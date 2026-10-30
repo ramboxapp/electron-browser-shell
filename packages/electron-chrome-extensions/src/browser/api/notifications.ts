@@ -1,8 +1,8 @@
-import { app, Extension, Notification } from 'electron'
+import { app, Extension, nativeImage, Notification } from 'electron'
 import { randomUUID } from 'node:crypto'
 import { ExtensionContext } from '../context'
 import { ExtensionEvent } from '../router'
-import { validateExtensionResource } from './common'
+import { toExtensionIconPath, validateExtensionResource } from './common'
 
 enum TemplateType {
   Basic = 'basic',
@@ -111,18 +111,21 @@ export class NotificationsAPI {
       this.registry.get(notificationId)?.close()
     }
 
-    let icon
+    let icon: string | Electron.NativeImage | undefined
 
+    /*
+      The icon as Chrome takes it: a path inside the extension, the extension's own absolute URL, or a
+      data: URL. The absolute URL failed with "Invalid iconUrl" (joined to the extension's folder as a
+      path), and a data: URL reached the toast as a string, which Electron reads as a file path, so
+      Windows showed no icon. It is decoded to an image instead.
+    */
     if (opts.iconUrl) {
-      let url
-      try {
-        url = new URL(opts.iconUrl)
-      } catch {}
-
-      if (url?.protocol === 'data:') {
-        icon = opts.iconUrl
+      if (/^data:/i.test(opts.iconUrl)) {
+        const image = nativeImage.createFromDataURL(opts.iconUrl)
+        icon = image.isEmpty() ? undefined : image
       } else {
-        icon = await validateExtensionResource(extension, opts.iconUrl)
+        const iconPath = toExtensionIconPath(extension, opts.iconUrl)
+        icon = iconPath && (await validateExtensionResource(extension, iconPath))
       }
 
       if (!icon) {

@@ -179,6 +179,31 @@ describe('chrome.notifications buttons', () => {
     await outcome('notifications.clear', second)
   })
 
+  it('takes the icon as a path, the extension URL or a data: URL, and nothing else', async () => {
+    const base = `chrome-extension://${browser.extension.id}`
+    for (const iconUrl of ['icon16.png', '/icon16.png', `${base}/icon16.png`]) {
+      const { value, error } = await outcome('notifications.create', 'icon', { ...options, iconUrl })
+      expect(error, iconUrl).to.be.undefined
+      expect(value).to.equal('icon')
+    }
+    const { error: foreign } = await outcome('notifications.create', 'icon', {
+      ...options,
+      iconUrl: 'chrome-extension://abcdefghijklmnopabcdefghijklmnop/icon16.png',
+    })
+    expect(foreign).to.equal('Invalid iconUrl')
+    const { error: web } = await outcome('notifications.create', 'icon', {
+      ...options,
+      iconUrl: 'https://example.com/icon16.png',
+    })
+    expect(web).to.equal('Invalid iconUrl')
+    const { error: brokenData } = await outcome('notifications.create', 'icon', {
+      ...options,
+      iconUrl: 'data:image/png;base64,AAAA',
+    })
+    expect(brokenData).to.equal('Invalid iconUrl')
+    await outcome('notifications.clear', 'icon')
+  })
+
   it('resolves whether there was a notification to clear or update', async () => {
     await outcome('notifications.create', 'exists', options)
     expect((await outcome('notifications.update', 'exists', { title: 'x' })).value).to.equal(true)
