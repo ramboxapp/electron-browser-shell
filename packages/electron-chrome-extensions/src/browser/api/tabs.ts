@@ -2,6 +2,7 @@ import { ExtensionContext } from '../context'
 import { ExtensionEvent } from '../router'
 import { getAllWindows, matchesPattern, matchesTitlePattern, TabContents } from './common'
 import { WindowsAPI } from './windows'
+import { rememberFavicon } from './favicon'
 import { wakeExtensionServiceWorker } from '../patch/service-worker-wake'
 import debug from 'debug'
 
@@ -56,6 +57,9 @@ export class TabsAPI {
     handle('tabs.setZoom', this.setZoom.bind(this))
 
     this.ctx.store.on('tab-added', this.observeTab.bind(this))
+    this.ctx.store.on('active-tab-changed', (tab: Electron.WebContents) =>
+      this.announceActivated(tab),
+    )
   }
 
   /*
@@ -184,6 +188,7 @@ export class TabsAPI {
 
     const faviconHandler = (event: Electron.Event, favicons: string[]) => {
       ;(tab as TabContents).favicon = favicons[0]
+      rememberFavicon(tab.getURL(), favicons[0])
       this.onUpdated(tabId)
     }
     tab.on('page-favicon-updated', faviconHandler)
@@ -227,7 +232,13 @@ export class TabsAPI {
 
     this.stateOf(tabId)
     this.onCreated(tabId)
-    this.onActivated(tabId)
+    /*
+      Observing a tab no longer activates it. It did for every tab since upstream bd7617c, which meant
+      it for tabs of chrome.tabs.create (create() activates those itself now): a tab the embedder
+      registers is not one the user switched to, and the last app Rambox registered at boot took
+      "active" while it sat in the background, so popups got the wrong tab until the next selectTab.
+      The first tab of a window is still its active one: the store makes it so after this.
+    */
 
     d(`Observing tab[${tabId}][${tab.getType()}] ${tab.getURL()}`)
   }
@@ -362,7 +373,8 @@ export class TabsAPI {
       this.ctx.store.tabDetailsCache.delete(tab.id)
     }
     const tabDetails = this.getTabDetails(tab)
-    if (details.active) {
+    // Active unless asked otherwise, Chrome's default.
+    if (details.active !== false) {
       queueMicrotask(() => this.onActivated(tab.id))
     }
     // Consumed by BrowserActionAPI to close the extension's popup, matching
@@ -910,12 +922,27 @@ export class TabsAPI {
     if (!tab) return
 
     const activeTab = this.ctx.store.getActiveTabFromWebContents(tab)
-    const activeChanged = activeTab?.id !== tabId
-    if (!activeChanged) return
+    if (activeTab?.id === tabId) return
 
-    const win = this.ctx.store.tabToWindow.get(tab)
-
+    // Announced by announceActivated, on the store's 'active-tab-changed'.
     this.ctx.store.setActiveTab(tab)
+  }
+
+  /*
+    tabs.onActivated and tabs.onHighlighted, for every change of a window's active tab.
+
+    They used to be broadcast only from onActivated, which the store bypasses: the first tab of a
+    window became active in addTab, and the next one in removeTab, with no event at all. An
+    extension that keeps its own idea of the active tab never heard of it, and the preload's
+    `sender.tab.active` — fed by this event — stayed false. Dashlane decides whether to decorate a
+    page from exactly that (`updateTabActiveInfo(sender, tab.highlighted || tab.active)` when its
+    content script says hello) and so decorated nothing in Rambox, which registers its tabs after the
+    service workers start. Measured on 30/10/2026: 0 fields marked with Rambox's order, 8 with the
+    event, the same as with the bench's order.
+  */
+  private announceActivated(tab: Electron.WebContents) {
+    const tabId = tab.id
+    const win = this.ctx.store.tabToWindow.get(tab)
 
     this.stateOf(tabId).lastAccessed = Date.now()
 

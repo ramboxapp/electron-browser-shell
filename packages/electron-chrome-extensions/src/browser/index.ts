@@ -12,6 +12,7 @@ import { WebNavigationAPI } from './api/web-navigation'
 import { ExtensionStore } from './store'
 import { ContextMenusAPI } from './api/context-menus'
 import { DownloadsAPI } from './api/downloads'
+import { FaviconAPI } from './api/favicon'
 import { FontSettingsAPI } from './api/font-settings'
 import { IdentityAPI } from './api/identity'
 import { IdleAPI } from './api/idle'
@@ -154,6 +155,7 @@ export class ElectronChromeExtensions extends EventEmitter {
     commands: CommandsAPI
     cookies: CookiesAPI
     downloads: DownloadsAPI
+    favicon: FaviconAPI
     fontSettings: FontSettingsAPI
     identity: IdentityAPI
     idle: IdleAPI
@@ -204,6 +206,7 @@ export class ElectronChromeExtensions extends EventEmitter {
       commands: new CommandsAPI(this.ctx),
       cookies: new CookiesAPI(this.ctx),
       downloads: new DownloadsAPI(this.ctx),
+      favicon: new FaviconAPI(this.ctx),
       fontSettings: new FontSettingsAPI(this.ctx),
       identity: new IdentityAPI(this.ctx),
       idle: new IdleAPI(this.ctx),

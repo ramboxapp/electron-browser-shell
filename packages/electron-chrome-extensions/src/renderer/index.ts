@@ -3072,6 +3072,105 @@ export const injectExtensionAPIs = () => {
     }
 
     /*
+      `chrome-extension://<own id>/_favicon/?pageUrl=…&size=…`, answered from the main process.
+
+      Electron does not serve it and a request to it never settles, so a `fetch` hung and an image
+      fired neither load nor error (see src/browser/api/favicon.ts for what Chrome answers). This
+      answers the two ways the catalog asks for it: `fetch` (RoboForm's worker) and an image's `src`,
+      set as a property or an attribute (SafeInCloud's popup). The image gets the icon as a data:
+      URL, which is also what keeps it readable from a canvas. A `_favicon` URL written in the HTML
+      itself is still requested natively, before this runs.
+    */
+    if (extensionId) {
+      const faviconBase = `chrome-extension://${extensionId}/_favicon`
+      const faviconTarget = (value: unknown): URL | undefined => {
+        if (typeof value !== 'string' && !(value instanceof URL)) return
+        let url: URL
+        try {
+          url = new URL(String(value), location.href)
+        } catch {
+          return
+        }
+        const isFavicon =
+          url.href.startsWith(faviconBase) &&
+          (url.pathname === '/_favicon' || url.pathname.startsWith('/_favicon/'))
+        return isFavicon ? url : undefined
+      }
+      const faviconPng = (url: URL): Promise<string> =>
+        electron.invokeExtension(
+          extensionId,
+          '_favicon.get',
+          {},
+          url.searchParams.get('pageUrl'),
+          url.searchParams.get('size'),
+        )
+
+      const nativeFetch = globalThis.fetch
+      if (typeof nativeFetch === 'function') {
+        globalThis.fetch = function fetch(input: RequestInfo | URL, init?: RequestInit) {
+          const target = faviconTarget(input instanceof Request ? input.url : input)
+          if (!target) return nativeFetch.call(this, input, init)
+          return faviconPng(target).then(
+            (png) =>
+              new Response(
+                Uint8Array.from(atob(png), (c) => c.charCodeAt(0)),
+                {
+                  status: 200,
+                  headers: { 'content-type': 'image/png' },
+                },
+              ),
+            () => {
+              throw new TypeError('Failed to fetch')
+            },
+          )
+        }
+      }
+
+      const srcDescriptor =
+        typeof HTMLImageElement !== 'undefined'
+          ? Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src')
+          : undefined
+      if (srcDescriptor?.set) {
+        const setNativeSrc = srcDescriptor.set
+        // The favicon each image is waiting for, so a later src wins over an answer still on its way.
+        const pending = new WeakMap<HTMLImageElement, string>()
+        Object.defineProperty(HTMLImageElement.prototype, 'src', {
+          ...srcDescriptor,
+          set(this: HTMLImageElement, value: string) {
+            const target = faviconTarget(value)
+            if (!target) {
+              pending.delete(this)
+              return setNativeSrc.call(this, value)
+            }
+            pending.set(this, target.href)
+            const settle = (src: string) => {
+              if (pending.get(this) !== target.href) return
+              pending.delete(this)
+              setNativeSrc.call(this, src)
+            }
+            faviconPng(target).then(
+              (png) => settle(`data:image/png;base64,${png}`),
+              // Not an image, so the element fires error, as Chrome's does for a failed request.
+              () => settle('data:,'),
+            )
+          },
+        })
+        const nativeSetAttribute = Element.prototype.setAttribute
+        Element.prototype.setAttribute = function setAttribute(name: string, value: string) {
+          if (
+            this instanceof HTMLImageElement &&
+            String(name).toLowerCase() === 'src' &&
+            faviconTarget(value)
+          ) {
+            this.src = value
+            return
+          }
+          return nativeSetAttribute.call(this, name, value)
+        }
+      }
+    }
+
+    /*
       Mirror everything replaced above onto the `browser` global.
 
       Chrome has no `browser` global at all — that is why webextension-polyfill exists — but Electron

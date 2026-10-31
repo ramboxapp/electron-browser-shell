@@ -175,12 +175,14 @@ export class ExtensionStore extends EventEmitter {
     this.tabToWindow.set(tab, window)
     this.addWindow(window)
 
-    const activeTab = this.getActiveTabFromWebContents(tab)
-    if (!activeTab) {
+    this.emit('tab-added', tab)
+
+    // The first tab of a window is its active one. After 'tab-added', so an extension hears
+    // tabs.onCreated before the tabs.onActivated this announces (see 'active-tab-changed' in TabsAPI),
+    // as in Chrome.
+    if (!this.getActiveTabFromWebContents(tab)) {
       this.setActiveTab(tab)
     }
-
-    this.emit('tab-added', tab)
   }
 
   removeTab(tab: Electron.WebContents) {

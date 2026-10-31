@@ -385,7 +385,11 @@ describe('chrome.tabs', () => {
     const openSecondWindow = () => {
       const other = new BrowserWindow({
         show: false,
-        webPreferences: { session: browser.session, nodeIntegration: false, contextIsolation: true },
+        webPreferences: {
+          session: browser.session,
+          nodeIntegration: false,
+          contextIsolation: true,
+        },
       })
       browser.extensions.addTab(other.webContents, other)
       return other
@@ -422,20 +426,92 @@ describe('chrome.tabs', () => {
 
   describe('onHighlighted', () => {
     it('fires with the activated tab, after onActivated', async () => {
-      // A second tab in the window the first one already made active: adding it activates it.
       const tab: Electron.WebContents = (webContents as any).create({
         sandbox: true,
         session: browser.session,
       })
       try {
+        browser.extensions.addTab(tab, browser.window)
         const highlighted = browser.crx.eventOnce('tabs.onHighlighted')
         await new Promise((resolve) => setTimeout(resolve, 200))
-        browser.extensions.addTab(tab, browser.window)
+        browser.extensions.selectTab(tab)
         const [info] = await highlighted
         expect(info.tabIds).to.deep.equal([tab.id])
         expect(info.windowId).to.equal(browser.window.id)
       } finally {
         tab.close()
+      }
+    })
+  })
+
+  /*
+    Every change of a window's active tab is announced, including the ones nobody asked for: the
+    first tab of a window, and the next one when the active tab goes away. Neither fired anything,
+    and an embedder that registers its tabs after the extension started (Rambox does) left the
+    extension's idea of the active tab — and the preload's sender.tab.active — at none: Dashlane
+    then decorated no page at all.
+  */
+  describe('the active tab', () => {
+    const newWindowTab = () => {
+      const win = new BrowserWindow({ show: false, webPreferences: { session: browser.session } })
+      const tab: Electron.WebContents = (webContents as any).create({
+        sandbox: true,
+        session: browser.session,
+      })
+      return { win, tab }
+    }
+    const activeOf = async (windowId: number) => {
+      const tabs = await browser.crx.exec('tabs.query', { active: true, windowId })
+      return tabs.map((tab: chrome.tabs.Tab) => tab.id)
+    }
+
+    it('announces the first tab of a window as activated', async () => {
+      const { win, tab } = newWindowTab()
+      try {
+        const activated = browser.crx.eventOnce('tabs.onActivated')
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        browser.extensions.addTab(tab, win)
+        const [info] = await activated
+        expect(info).to.deep.equal({ tabId: tab.id, windowId: win.id })
+      } finally {
+        tab.close()
+        win.destroy()
+      }
+    })
+
+    it('does not activate a tab the embedder adds to a window that has one', async () => {
+      const tab: Electron.WebContents = (webContents as any).create({
+        sandbox: true,
+        session: browser.session,
+      })
+      try {
+        browser.extensions.addTab(tab, browser.window)
+        expect(await activeOf(browser.window.id)).to.deep.equal([browser.webContents.id])
+      } finally {
+        tab.close()
+      }
+    })
+
+    it('announces the next tab when the active one is removed', async () => {
+      const { win, tab } = newWindowTab()
+      const second: Electron.WebContents = (webContents as any).create({
+        sandbox: true,
+        session: browser.session,
+      })
+      try {
+        browser.extensions.addTab(tab, win)
+        browser.extensions.addTab(second, win)
+        browser.extensions.selectTab(second)
+        const activated = browser.crx.eventOnce('tabs.onActivated')
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        browser.extensions.removeTab(second)
+        const [info] = await activated
+        expect(info).to.deep.equal({ tabId: tab.id, windowId: win.id })
+        expect(await activeOf(win.id)).to.deep.equal([tab.id])
+      } finally {
+        tab.close()
+        second.close()
+        win.destroy()
       }
     })
   })
