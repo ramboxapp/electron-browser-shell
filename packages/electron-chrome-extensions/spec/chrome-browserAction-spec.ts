@@ -7,6 +7,7 @@ import {
   ipcMain,
   nativeImage,
   session,
+  webContents,
   WebContents,
   WebContentsView,
 } from 'electron'
@@ -192,6 +193,49 @@ describe('chrome.browserAction', () => {
       await activateExtension(browser.partition, browser.window.webContents, browser.extension)
       const [popup] = await popupPromise
       expect(popup.extensionId).to.equal(browser.extension.id)
+    })
+
+    // HyperWrite and Wordtune open their login with window.open from the popup, and Wordtune closes
+    // the popup right after. Chrome opens it as a tab that outlives the popup; without a handler,
+    // Electron's window went down with the popup and nobody could sign in.
+    const openFromPopup = async (target: string) => {
+      const popupPromise = emittedOnce(browser.extensions, 'browser-action-popup-created')
+      await activateExtension(browser.partition, browser.window.webContents, browser.extension)
+      const [popup] = await popupPromise
+      await popup.whenReady()
+      const before = new Set(webContents.getAllWebContents().map((wc) => wc.id))
+      const childWindows = BrowserWindow.getAllWindows().length
+      await popup.browserWindow.webContents.executeJavaScript(
+        `window.open(${JSON.stringify(target)}, '_blank'), window.close()`,
+        true,
+      )
+      return { popup, before, childWindows }
+    }
+
+    it('opens a window.open from the popup as a tab that outlives it', async () => {
+      const target = `${server.getUrl()}?login=${uuid()}`
+      const { before, childWindows } = await openFromPopup(target)
+
+      let tab: WebContents | undefined
+      for (let i = 0; i < 50 && !tab; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        tab = webContents
+          .getAllWebContents()
+          .find((wc) => !before.has(wc.id) && !wc.isDestroyed() && wc.getURL() === target)
+      }
+      expect(tab, 'a tab with the opened url').to.exist
+      // A tab of the browser, not a window of Electron's own: none was added.
+      expect(BrowserWindow.getAllWindows().length).to.be.at.most(childWindows)
+      tab!.close()
+    })
+
+    it("does not open another extension's page or a non-web url from the popup", async () => {
+      const { before } = await openFromPopup('chrome-extension://abcdefghijklmnopabcdefghijklmnop/page.html')
+      await new Promise((resolve) => setTimeout(resolve, 500))
+      const opened = webContents.getAllWebContents().filter((wc) => !before.has(wc.id) && !wc.isDestroyed())
+      expect(opened.map((wc) => wc.getURL())).to.not.include(
+        'chrome-extension://abcdefghijklmnopabcdefghijklmnop/page.html',
+      )
     })
   })
 

@@ -496,6 +496,14 @@ export class BrowserActionAPI {
 
       if (this.popup.browserWindow) {
         this.ctx.store.extensionContextTypes.set(this.popup.browserWindow.webContents, 'POPUP')
+        // Chrome opens a popup's window.open as a tab of the browser, which outlives the popup.
+        // Without a handler Electron opens a window tied to the popup, and the popup's close on blur
+        // took it down 20-30 ms later: HyperWrite and Wordtune open their login that way, and nobody
+        // could sign in (02/11/2026).
+        this.popup.browserWindow.webContents.setWindowOpenHandler(({ url }) => {
+          this.openTabFromPopup(extensionId, url)
+          return { action: 'deny' }
+        })
       }
 
       d(`opened popup: ${popupUrl}`)
@@ -507,6 +515,33 @@ export class BrowserActionAPI {
       const tabDetails = this.ctx.store.tabDetailsCache.get(tab.id)
       this.ctx.router.sendEvent(extensionId, 'browserAction.onClicked', tabDetails)
     }
+  }
+
+  /**
+   * A window.open from the popup, as tabs.create would open it: a web page or one of the
+   * extension's own pages, in a tab that takes focus — so the popup closes, as it does in Chrome
+   * (see 'extension-created-tab'). Anything else (another extension's page, javascript:, file:)
+   * is dropped, as the denied window would have been.
+   */
+  private openTabFromPopup(extensionId: string, url: string) {
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      d('popup window.open: invalid url %s', url)
+      return
+    }
+    const isWeb = parsed.protocol === 'http:' || parsed.protocol === 'https:'
+    const isOwnPage = parsed.protocol === 'chrome-extension:' && parsed.host === extensionId
+    if (!isWeb && !isOwnPage) {
+      d('popup window.open: not opening %s', url)
+      return
+    }
+    d('popup window.open: opening %s as a tab', url)
+    this.ctx.store
+      .createTab({ url, active: true })
+      .then(() => this.ctx.store.emit('extension-created-tab', extensionId, true))
+      .catch((error) => console.error(`Unable to open ${url} from the popup of ${extensionId}`, error))
   }
 
   private activateContextMenu(details: ActivateDetails) {
