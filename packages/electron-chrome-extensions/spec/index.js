@@ -69,6 +69,27 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'crx', privileges: { bypassCSP: true } },
 ])
 
+// Every session the run opens, so they can all be emptied before exiting.
+const sessionsInRun = new Set()
+app.on('session-created', (ses) => sessionsInRun.add(ses))
+
+/**
+ * Electron 43 crashes while exiting (0xc0000005 on Windows, SIGSEGV on Linux) when an extension's
+ * service worker is still starting and a content script has already called it through
+ * chrome.runtime.connect or sendMessage, as long as a second session is open. The exit comes right
+ * after the last test, so a fixture whose content script talks to its worker takes the whole run
+ * down after a clean summary. No library code is involved: stock 43.0.0 does it. Unloading the
+ * extensions first leaves nothing to crash on, and 44.10.1 does not need it.
+ */
+const unloadExtensionsFromAllSessions = () => {
+  for (const ses of sessionsInRun) {
+    const extensions = ses.extensions || ses
+    for (const extension of extensions.getAllExtensions()) {
+      extensions.removeExtension(extension.id)
+    }
+  }
+}
+
 const cleanupTestSessions = async () => {
   const sessionsPath = path.join(app.getPath('userData'), 'Partitions')
 
@@ -171,7 +192,9 @@ app
     const cb = () => {
       // Ensure the callback is called after runner is defined
       process.nextTick(() => {
-        process.exit(runner.failures)
+        unloadExtensionsFromAllSessions()
+        // Not the count itself: 256 failures would exit with 0 where the OS keeps only 8 bits.
+        process.exit(runner.failures > 0 ? 1 : 0)
       })
     }
 
