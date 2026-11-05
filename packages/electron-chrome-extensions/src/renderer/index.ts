@@ -2292,6 +2292,104 @@ export const injectExtensionAPIs = () => {
       getResourceIdentifiers = answering(() => undefined)
     }
 
+    /*
+      chrome.tabCapture / chrome.desktopCapture: the stream ids the main process hands out are
+      Chrome-shaped and ours. Electron ties a tab's capture id to the exact WebContents that will call
+      getUserMedia, so it can only be minted once that page is known — which is here, at the call.
+      getUserMedia in the extension's pages is wrapped: a `chromeMediaSourceId` of ours is swapped,
+      through the main process, for what Electron accepts (`tab` + its id for this page, or `desktop`
+      + a desktopCapturer id). An id that is not ours is passed through untouched, so a raw
+      desktopCapturer id keeps working and a bad one fails with Chromium's own error. Tab captures
+      report their status back, for getCapturedTabs and onStatusChanged.
+    */
+    const captureStreams = (() => {
+      if (!declares('tabCapture', 'desktopCapture')) return undefined
+      const mediaDevices = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined
+      if (!mediaDevices || typeof mediaDevices.getUserMedia !== 'function') return undefined
+      const resolveStream = invokeExtension('desktopCapture.resolveStream')
+      const reportStream = invokeExtension('tabCapture.reportStream')
+      const original = mediaDevices.getUserMedia
+      const KINDS = ['audio', 'video'] as const
+
+      /* The `chromeMediaSourceId` of a tab or desktop constraint, with the source it was asked as. */
+      const sourceOf = (constraint: any): { id: string; source: string } | undefined => {
+        const mandatory = constraint && typeof constraint === 'object' && constraint.mandatory
+        if (!mandatory || typeof mandatory.chromeMediaSourceId !== 'string') return undefined
+        const source = mandatory.chromeMediaSource
+        return source === 'tab' || source === 'desktop'
+          ? { id: mandatory.chromeMediaSourceId, source }
+          : undefined
+      }
+      const report = (streamId: string, status: string) => {
+        ;(reportStream(streamId, status) as Promise<unknown>).catch(() => {})
+      }
+      /* 'active' now; 'stopped' once every track ended — track.stop() fires no event, so it is wrapped. */
+      const watch = (streamId: string, stream: MediaStream) => {
+        report(streamId, 'active')
+        const tracks = stream.getTracks()
+        let stopped = false
+        const check = () => {
+          if (stopped || !tracks.every((track) => track.readyState === 'ended')) return
+          stopped = true
+          report(streamId, 'stopped')
+        }
+        for (const track of tracks) {
+          track.addEventListener('ended', check)
+          const stop = track.stop
+          track.stop = function (this: MediaStreamTrack) {
+            stop.call(this)
+            queueMicrotask(check)
+          }
+        }
+      }
+
+      const getUserMedia = async function (this: unknown, constraints?: any): Promise<MediaStream> {
+        const asked = new Map<string, string>()
+        for (const kind of KINDS) {
+          const wanted = sourceOf(constraints?.[kind])
+          if (wanted) asked.set(wanted.id, wanted.source)
+        }
+        const resolved = new Map<string, { chromeMediaSource: string; chromeMediaSourceId: string }>()
+        for (const [id, source] of asked) {
+          const answer = await (resolveStream(id, source) as Promise<any>).catch(() => null)
+          if (answer && typeof answer.chromeMediaSourceId === 'string') resolved.set(id, answer)
+        }
+        if (resolved.size === 0) return original.call(mediaDevices, constraints)
+
+        const rewritten: any = { ...constraints }
+        for (const kind of KINDS) {
+          const wanted = sourceOf(constraints[kind])
+          const answer = wanted && resolved.get(wanted.id)
+          if (!answer) continue
+          rewritten[kind] = {
+            ...constraints[kind],
+            mandatory: {
+              ...constraints[kind].mandatory,
+              chromeMediaSource: answer.chromeMediaSource,
+              chromeMediaSourceId: answer.chromeMediaSourceId,
+            },
+          }
+        }
+        const tabStreams = Array.from(resolved)
+          .filter(([, answer]) => answer.chromeMediaSource === 'tab')
+          .map(([id]) => id)
+        try {
+          const stream = await original.call(mediaDevices, rewritten)
+          for (const id of tabStreams) watch(id, stream)
+          return stream
+        } catch (error) {
+          for (const id of tabStreams) report(id, 'error')
+          throw error
+        }
+      }
+      Object.defineProperty(mediaDevices, 'getUserMedia', {
+        value: getUserMedia,
+        writable: true,
+        configurable: true,
+      })
+      return { getUserMedia }
+    })()
+
     const floorDefinitions: Record<
       string,
       { shouldInject?: () => boolean; factory: (base: any) => any }
@@ -2823,22 +2921,90 @@ export const injectExtensionAPIs = () => {
         }),
       },
 
+      /*
+        The main process enumerates the sources and the embedder shows the picker (see
+        src/browser/api/desktop-capture.ts). Surface and errors as Edge 156 and Chromium 147 answer:
+        callback-only, a request id counting from 1, a synchronous TypeError for a missing callback or
+        an unknown source type (and, as Chrome's bindings do, any object in second position is read as
+        the target tab), and a cancel that closes the picker without ever calling the callback.
+      */
       desktopCapture: {
         shouldInject: () => declares('desktopCapture'),
         factory: () => {
           let nextRequestId = 0
+          const pending = new Map<number, Function>()
+          const SIGNATURE =
+            'desktopCapture.chooseDesktopMedia(array sources, optional tabs.Tab targetTab, optional object options, function callback)'
+          const SOURCE_TYPES = ['audio', 'screen', 'tab', 'window']
+          const TAB_PROPERTIES = [
+            'active',
+            'highlighted',
+            'incognito',
+            'index',
+            'pinned',
+            'selected',
+            'windowId',
+          ]
           return {
-            /*
-              Callback-only, returning a request id, as Chrome's. There is no picker in the host, so
-              the answer is the one Chrome gives when the user cancels it: an empty stream id.
-            */
             chooseDesktopMedia: (...args: any[]) => {
-              const callback = args.reverse().find((arg) => typeof arg === 'function')
+              const callback = typeof args[args.length - 1] === 'function' ? args.pop() : undefined
+              const [sources, targetTab, options] = args
+              if (!callback || !Array.isArray(sources)) {
+                throw new TypeError(`Error in invocation of ${SIGNATURE}: No matching signature.`)
+              }
+              sources.forEach((source, index) => {
+                if (!SOURCE_TYPES.includes(source)) {
+                  throw new TypeError(
+                    `Error in invocation of ${SIGNATURE}: Error at parameter 'sources': Error at index ${index}: Value must be one of audio, screen, tab, window.`,
+                  )
+                }
+              })
+              if (targetTab !== undefined && targetTab !== null) {
+                const missing =
+                  typeof targetTab !== 'object'
+                    ? TAB_PROPERTIES[0]
+                    : TAB_PROPERTIES.find((property) => !(property in targetTab))
+                if (missing) {
+                  throw new TypeError(
+                    `Error in invocation of ${SIGNATURE}: Error at parameter 'targetTab': Missing required property '${missing}'.`,
+                  )
+                }
+              }
               const requestId = ++nextRequestId
-              if (callback) queueMicrotask(() => callback('', { canRequestAudioTrack: false }))
+              pending.set(requestId, callback)
+              // Nothing after a cancel: Chrome drops the callback with the picker (measured).
+              const settle = (dispatch: () => void) => {
+                if (!pending.delete(requestId)) return
+                dispatch()
+              }
+              electron
+                .invokeExtension(
+                  extensionId,
+                  'desktopCapture.chooseDesktopMedia',
+                  {},
+                  requestId,
+                  sources,
+                  targetTab ? { id: targetTab.id } : undefined,
+                  options,
+                )
+                .then(
+                  (result: any) =>
+                    settle(() =>
+                      callback(result?.streamId ?? '', {
+                        canRequestAudioTrack: !!result?.canRequestAudioTrack,
+                      }),
+                    ),
+                  (error: unknown) =>
+                    settle(() => withLastError(errorMessage(error), () => callback(null, null))),
+                )
               return requestId
             },
-            cancelChooseDesktopMedia: noop,
+            cancelChooseDesktopMedia: (requestId: number) => {
+              pending.delete(requestId)
+              electron
+                .invokeExtension(extensionId, 'desktopCapture.cancelChooseDesktopMedia', {}, requestId)
+                .catch(() => {})
+            },
             DesktopCaptureSourceType: enumOf('screen', 'window', 'tab', 'audio'),
             SelfCapturePreferenceEnum: enumOf('include', 'exclude'),
             SystemAudioPreferenceEnum: enumOf('include', 'exclude'),
@@ -2849,14 +3015,52 @@ export const injectExtensionAPIs = () => {
 
       tabCapture: {
         shouldInject: () => declares('tabCapture'),
-        factory: () => ({
-          getMediaStreamId: failWith(
-            'Extension has not been invoked for the current page (see activeTab permission). Chrome pages cannot be captured.',
-          ),
-          getCapturedTabs: answering(() => []),
-          onStatusChanged: inert(),
-          TabCaptureState: enumOf('pending', 'active', 'stopped', 'error'),
-        }),
+        factory: () => {
+          const getMediaStreamId = invokeExtension('tabCapture.getMediaStreamId')
+          const api: Record<string, unknown> = {
+            getMediaStreamId,
+            getCapturedTabs: invokeExtension('tabCapture.getCapturedTabs'),
+            onStatusChanged: new ExtensionEvent('tabCapture.onStatusChanged'),
+            TabCaptureState: enumOf('pending', 'active', 'stopped', 'error'),
+          }
+          /*
+            `capture` is for the extension's pages only (Chrome has none in the worker: measured): the
+            active tab's stream id, then getUserMedia with it under the options' constraints. Takes
+            `(options, callback)` and nothing else, as Chrome's.
+          */
+          if (captureStreams) {
+            api.capture = (options: any, callback: any) => {
+              if (!options || typeof options !== 'object' || typeof callback !== 'function') {
+                throw new TypeError(
+                  'Error in invocation of tabCapture.capture(tabCapture.CaptureOptions options, function callback): No matching signature.',
+                )
+              }
+              const constraint = (wanted: unknown, given: any, streamId: string) =>
+                wanted
+                  ? {
+                      ...(given && typeof given === 'object' ? given : {}),
+                      mandatory: {
+                        ...(given?.mandatory || {}),
+                        chromeMediaSource: 'tab',
+                        chromeMediaSourceId: streamId,
+                      },
+                    }
+                  : false
+              ;(getMediaStreamId({}) as Promise<string>)
+                .then((streamId) =>
+                  captureStreams.getUserMedia({
+                    audio: constraint(options.audio, options.audioConstraints, streamId),
+                    video: constraint(options.video, options.videoConstraints, streamId),
+                  }),
+                )
+                .then(
+                  (stream) => callback(stream),
+                  (error) => withLastError(errorMessage(error), () => callback(null)),
+                )
+            }
+          }
+          return api
+        },
       },
 
       pageCapture: {

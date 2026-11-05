@@ -1,4 +1,6 @@
 /** App-specific implementation details for extensions. */
+import type { DesktopMediaChoice, DesktopMediaRequest } from './api/desktop-capture'
+
 export interface ChromeExtensionImpl {
   createTab?(
     details: chrome.tabs.CreateProperties,
@@ -26,6 +28,17 @@ export interface ChromeExtensionImpl {
 
   createWindow?(details: chrome.windows.CreateData): Promise<Electron.BaseWindow>
   removeWindow?(window: Electron.BaseWindow): void
+
+  /**
+   * The picker behind `chrome.desktopCapture.chooseDesktopMedia`: show the request's sources (screens,
+   * windows and tabs, as the extension asked) and resolve the user's choice, or nothing when they
+   * dismiss it. `request.signal` aborts when the extension cancels the request or unloads: close the
+   * picker then. Without this hook the extension gets Chrome's answer for a dismissed picker, an
+   * empty stream id.
+   */
+  chooseDesktopMedia?(
+    request: DesktopMediaRequest,
+  ): Promise<DesktopMediaChoice | undefined> | DesktopMediaChoice | undefined
 
   requestPermissions?(
     extension: Electron.Extension,

@@ -450,6 +450,7 @@ export class ContextMenusAPI {
     }
 
     this.ctx.store.noteUserGesture(extensionId)
+    this.ctx.store.noteInvocation(extensionId, webContents)
     this.ctx.router.sendEvent(extensionId, 'contextMenus.onClicked', data, tab)
   }
 }

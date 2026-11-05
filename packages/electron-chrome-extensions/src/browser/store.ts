@@ -50,6 +50,15 @@ export class ExtensionStore extends EventEmitter {
   }
 
   /**
+   * A user action reached an extension ON a tab — the action click, a context menu item, a keyboard
+   * command — which is what grants Chrome's `activeTab` for that tab: the one thing that lets the
+   * extension capture it (`tabCapture.getMediaStreamId`). Listened to by the desktopCapture API.
+   */
+  noteInvocation(extensionId: string, tab: Electron.WebContents) {
+    this.emit('invoked', extensionId, tab)
+  }
+
+  /**
    * The type a window was created with through `windows.create` (`'popup'` for a popup or a panel,
    * as Chrome reports both). Windows the embedder registers itself are `'normal'`.
    */

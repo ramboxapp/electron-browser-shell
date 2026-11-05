@@ -123,6 +123,8 @@ export class CommandsAPI {
     if (!declared?.some((entry) => entry.name === command)) return false
     if (command === '_execute_action' || command === '_execute_browser_action') return false
     this.ctx.store.noteUserGesture(extensionId)
+    const invokedTab = tab ? this.ctx.store.getTabById(tab.id!) : undefined
+    if (invokedTab) this.ctx.store.noteInvocation(extensionId, invokedTab)
     /*
       A plain copy of the tab, and no argument at all without one: `ServiceWorkerMain.send` refuses
       what it cannot serialize ("Failed to serialize arguments", seen in Rambox with the cached tab

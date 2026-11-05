@@ -85,7 +85,12 @@ describe('the anti-crash floor (absent namespaces)', () => {
       const calls = Object.entries<any>(members).filter(([, m]) => m.kind === 'call')
       expect(calls.length, 'methods walked').to.be.greaterThan(80)
 
-      const throwing = calls.filter(([, m]) => m.returned === 'throws')
+      // Called with no arguments. Chrome itself throws a TypeError for the one that needs a callback
+      // (chooseDesktopMedia: "No matching signature", measured in Edge 156 and Chromium 147).
+      const THROWS_LIKE_CHROME = new Set(['desktopCapture.chooseDesktopMedia'])
+      const throwing = calls
+        .filter(([name, m]) => m.returned === 'throws' && !THROWS_LIKE_CHROME.has(name))
+        .map(([name]) => name)
       expect(throwing, 'methods that throw').to.deep.equal([])
 
       const undefinedReturns = calls

@@ -13,6 +13,7 @@ import { WindowsAPI } from './api/windows'
 import { WebNavigationAPI } from './api/web-navigation'
 import { ExtensionStore } from './store'
 import { ContextMenusAPI } from './api/context-menus'
+import { DesktopCaptureAPI } from './api/desktop-capture'
 import { DownloadsAPI } from './api/downloads'
 import { FaviconAPI } from './api/favicon'
 import { FontSettingsAPI } from './api/font-settings'
@@ -83,6 +84,13 @@ function resolvePreloadPath(modulePath?: string) {
 
 export type { SidePanelShowDetails, SidePanelHideDetails } from './api/side-panel'
 export type { AuthRequestDetails, AuthRequestDecision } from './api/web-request'
+export type {
+  DesktopMediaChoice,
+  DesktopMediaOptions,
+  DesktopMediaRequest,
+  DesktopMediaSource,
+  DesktopMediaSourceType,
+} from './api/desktop-capture'
 
 export interface ChromeExtensionOptions extends ChromeExtensionImpl {
   /**
@@ -157,6 +165,7 @@ export class ElectronChromeExtensions extends EventEmitter {
     contextMenus: ContextMenusAPI
     commands: CommandsAPI
     cookies: CookiesAPI
+    desktopCapture: DesktopCaptureAPI
     downloads: DownloadsAPI
     favicon: FaviconAPI
     fontSettings: FontSettingsAPI
@@ -210,6 +219,7 @@ export class ElectronChromeExtensions extends EventEmitter {
       contextMenus: new ContextMenusAPI(this.ctx),
       commands: new CommandsAPI(this.ctx),
       cookies: new CookiesAPI(this.ctx),
+      desktopCapture: new DesktopCaptureAPI(this.ctx),
       downloads: new DownloadsAPI(this.ctx),
       favicon: new FaviconAPI(this.ctx),
       fontSettings: new FontSettingsAPI(this.ctx),

@@ -475,6 +475,7 @@ export class BrowserActionAPI {
     // panel, and neither the popup nor onClicked runs (measured with Extensions.triggerAction on
     // Chromium 147). The click is a user gesture either way.
     this.ctx.store.noteUserGesture(extensionId)
+    this.ctx.store.noteInvocation(extensionId, tab)
     if (this.actionClickInterceptor?.(extensionId, tab)) return
 
     const popupUrl = this.getPopupUrl(extensionId, tab.id)

@@ -1,0 +1,19 @@
+{
+  "name": "chrome-capture-mv3",
+  "version": "1.0",
+  "manifest_version": 3,
+  "description": "Declares tabCapture and desktopCapture, for chrome-desktopCapture-spec: a worker that answers the spec's exec(), and a page that captures.",
+  "action": { "default_title": "capture" },
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    { "matches": ["<all_urls>"], "js": ["content-script.js"], "run_at": "document_end" },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["main-world.js"],
+      "run_at": "document_end",
+      "world": "MAIN"
+    }
+  ],
+  "permissions": ["activeTab", "desktopCapture", "tabCapture", "tabs"],
+  "host_permissions": ["<all_urls>"]
+}

@@ -70,6 +70,8 @@ export const useExtensionBrowser = (opts: {
   createWindow?: ChromeExtensionImpl['createWindow']
   /** The embedder's `tabs.discard`; specs of that API provide one, the rest leave it unimplemented. */
   discardTab?: ChromeExtensionImpl['discardTab']
+  /** The embedder's desktop media picker; the desktopCapture spec provides one, the rest leave it unimplemented. */
+  chooseDesktopMedia?: ChromeExtensionImpl['chooseDesktopMedia']
   /** Merged into the window's webPreferences — `webviewTag` for specs that need a real guest. */
   webPreferences?: Electron.WebPreferences
 }) => {
@@ -100,6 +102,7 @@ export const useExtensionBrowser = (opts: {
       },
       ...(opts.createWindow ? { createWindow: opts.createWindow } : {}),
       ...(opts.discardTab ? { discardTab: opts.discardTab } : {}),
+      ...(opts.chooseDesktopMedia ? { chooseDesktopMedia: opts.chooseDesktopMedia } : {}),
     })
 
     const extensionDir = opts.extensionPath
