@@ -301,7 +301,10 @@ export class ExtensionRouter {
     const sessionExtensions = session.extensions || session
     const extension = sessionExtensions.getExtension(extensionId)
     if (!extension) {
-      throw new Error(`extension not registered in session [extensionId:${extensionId}]`)
+      // Not an error: this arrives over IPC from a worker that is still starting while its extension
+      // is being unloaded, and throwing here is an uncaught exception in the embedder's main process.
+      d(`ignoring '${eventName}' listener for unloaded extension ${extensionId}`)
+      return
     }
 
     if (!listeners.has(eventName)) {

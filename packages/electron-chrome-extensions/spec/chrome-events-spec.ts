@@ -1,4 +1,5 @@
 import { expect } from 'chai'
+import { ipcMain } from 'electron'
 
 import { useExtensionBrowser, useServer } from './hooks'
 
@@ -11,6 +12,17 @@ import { useExtensionBrowser, useServer } from './hooks'
 describe('chrome.events.Event', () => {
   const server = useServer()
   const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc' })
+
+  describe('a listener for an extension that is no longer loaded', () => {
+    it('is ignored rather than thrown into the main process', () => {
+      // What a worker still starting sends while its extension is being unloaded. Nothing catches a
+      // throw from an ipcMain.on handler, so it reached the embedder as an uncaught exception.
+      const event = { type: 'frame', sender: browser.webContents }
+      expect(() =>
+        ipcMain.emit('crx-add-listener', event, 'not-a-loaded-extension', 'tabs.onUpdated'),
+      ).to.not.throw()
+    })
+  })
 
   describe('hasListener()', () => {
     it('does not throw and returns a boolean', async () => {
