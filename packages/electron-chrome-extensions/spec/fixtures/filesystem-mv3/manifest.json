@@ -1,0 +1,8 @@
+{
+  "name": "chrome-filesystem-mv3",
+  "version": "1.0",
+  "manifest_version": 3,
+  "description": "A page that exercises the sandboxed FileSystem API, for chrome-filesystem-shim-spec.",
+  "background": { "service_worker": "background.js" },
+  "permissions": ["unlimitedStorage", "storage"]
+}

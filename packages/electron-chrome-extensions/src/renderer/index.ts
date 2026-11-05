@@ -6,6 +6,7 @@ import {
   GENERIC_FAMILIES,
   SCRIPT_CODES,
 } from '../shared/font-settings-schema'
+import { installFileSystemShim } from './filesystem-shim'
 
 export const injectExtensionAPIs = () => {
   interface ExtensionMessageOptions {
@@ -3667,9 +3668,21 @@ export const injectExtensionAPIs = () => {
     }
   }
 
+  /*
+    The sandboxed FileSystem of the extension's pages (frames and offscreen documents; a worker has
+    no window): Electron blocks the scheme, so `webkitRequestFileSystem` is answered over IndexedDB
+    with Chrome's shapes. See filesystem-shim.ts. Installed in the main world, where the page's
+    scripts read it.
+  */
+  const isExtensionPage =
+    process.type === 'renderer' &&
+    typeof location !== 'undefined' &&
+    location.protocol === 'chrome-extension:'
+
   if (!process.contextIsolated) {
     console.warn(`injectExtensionAPIs: context isolation disabled in ${location.href}`)
     mainWorldScript()
+    if (isExtensionPage) installFileSystemShim(location.hostname)
     return
   }
 
@@ -3682,9 +3695,20 @@ export const injectExtensionAPIs = () => {
       ;(contextBridge as any).executeInMainWorld({
         func: mainWorldScript,
       })
+      if (isExtensionPage) {
+        ;(contextBridge as any).executeInMainWorld({
+          func: installFileSystemShim,
+          args: [location.hostname],
+        })
+      }
     } else {
       // TODO(mv3): remove webFrame usage
       webFrame.executeJavaScript(`(${mainWorldScript}());`)
+      if (isExtensionPage) {
+        webFrame.executeJavaScript(
+          `(${installFileSystemShim})(${JSON.stringify(location.hostname)});`,
+        )
+      }
     }
   } catch (error) {
     console.error(`injectExtensionAPIs error (${location.href})`)
