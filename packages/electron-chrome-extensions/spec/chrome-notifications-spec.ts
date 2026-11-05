@@ -81,7 +81,8 @@ describe('chrome.notifications surface', () => {
       onPermissionLevelChanged: 'function',
       onShowSettings: 'function',
     })
-    expect(result.permissionLevel).to.equal('granted')
+    // A Linux runner has no D-Bus, so there Electron reports no notification support: the answer is 'denied'.
+    expect(result.permissionLevel).to.equal(Notification.isSupported() ? 'granted' : 'denied')
   })
 })
 
