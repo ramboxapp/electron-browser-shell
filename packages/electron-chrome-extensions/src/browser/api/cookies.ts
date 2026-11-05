@@ -1,6 +1,7 @@
 import { ExtensionContext } from '../context'
 import { ExtensionEvent } from '../router'
 import { patternsCover } from './lib/match-patterns'
+import { hostPatternsOf } from './lib/host-permissions'
 
 enum CookieStoreID {
   Default = '0',
@@ -40,18 +41,6 @@ const createCookieDetails = (cookie: Electron.Cookie): chrome.cookies.Cookie => 
  */
 const cookieUrl = (cookie: Electron.Cookie) =>
   `${cookie.secure ? 'https' : 'http'}://${(cookie.domain || '').replace(/^\./, '')}/`
-
-/** The host patterns a manifest grants: MV3 lists them apart, MV2 mixes them into `permissions`. */
-const hostPatternsOf = (extension: Electron.Extension): string[] => {
-  const manifest: chrome.runtime.Manifest = extension.manifest || {}
-  const mixed = ((manifest.permissions as string[]) || []).filter(
-    (permission) => permission === '<all_urls>' || permission.includes('://'),
-  )
-  const patterns =
-    manifest.manifest_version === 3 ? [...(manifest.host_permissions || []), ...mixed] : mixed
-  // A host permission is about the host: its path is ignored, as Chrome ignores it.
-  return patterns.map((pattern) => pattern.replace(/^([^:]+:\/\/[^/]*)\/.*$/, '$1/*'))
-}
 
 const mayAccessCookie = (extension: Electron.Extension, cookie: Electron.Cookie) =>
   patternsCover(hostPatternsOf(extension), [cookieUrl(cookie)])

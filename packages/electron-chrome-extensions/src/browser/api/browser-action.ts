@@ -541,7 +541,9 @@ export class BrowserActionAPI {
     this.ctx.store
       .createTab({ url, active: true })
       .then(() => this.ctx.store.emit('extension-created-tab', extensionId, true))
-      .catch((error) => console.error(`Unable to open ${url} from the popup of ${extensionId}`, error))
+      .catch((error) =>
+        console.error(`Unable to open ${url} from the popup of ${extensionId}`, error),
+      )
   }
 
   private activateContextMenu(details: ActivateDetails) {
@@ -604,6 +606,35 @@ export class BrowserActionAPI {
       x: Math.floor(anchorRect.x),
       y: Math.floor(anchorRect.y + anchorRect.height),
     })
+  }
+
+  /** The embedder's `_execute_action`: the toolbar click, from a keyboard shortcut. */
+  openPopupFor(
+    extensionId: string,
+    tab?: Electron.WebContents,
+    anchorRect?: { x: number; y: number; width: number; height: number },
+  ) {
+    const target =
+      tab && !tab.isDestroyed() && this.ctx.store.tabs.has(tab)
+        ? tab
+        : this.ctx.store.getActiveTabOfCurrentWindow()
+    if (!target) return false
+    const window = this.ctx.store.tabToWindow.get(target)
+    const [width = 0] = window && !window.isDestroyed() ? window.getSize() : []
+    const anchorSize = 64
+    this.ctx.store.noteUserGesture(extensionId)
+    this.activateClick({
+      eventType: 'click',
+      extensionId,
+      tabId: target.id,
+      anchorRect: anchorRect || {
+        x: width - anchorSize,
+        y: 0,
+        width: anchorSize,
+        height: anchorSize,
+      },
+    })
+    return true
   }
 
   private openPopup = (event: ExtensionEvent, options?: chrome.action.OpenPopupOptions) => {

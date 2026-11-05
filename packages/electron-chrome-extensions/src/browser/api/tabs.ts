@@ -311,6 +311,12 @@ export class TabsAPI {
     return details
   }
 
+  /** The `chrome.tabs.Tab` of a tracked WebContents, for an embedder passing a tab to an event. */
+  describeTab(tab: Electron.WebContents): chrome.tabs.Tab | undefined {
+    if (!this.ctx.store.tabs.has(tab) || tab.isDestroyed()) return undefined
+    return this.getTabDetails(tab as TabContents) as chrome.tabs.Tab
+  }
+
   private getTabDetails(tab: TabContents) {
     if (this.ctx.store.tabDetailsCache.has(tab.id)) {
       return this.ctx.store.tabDetailsCache.get(tab.id)

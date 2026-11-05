@@ -1,5 +1,7 @@
 import { expect } from 'chai'
 
+import { WebContentsView } from 'electron'
+
 import { useExtensionBrowser, useServer } from './hooks'
 
 /**
@@ -51,6 +53,30 @@ describe('browser global', () => {
   it('exposes windows events, which an extension registers at top level', async () => {
     const result = await report()
     expect(result.windowsEvent).to.be.true
+  })
+
+  it('carries, in an extension page, the namespaces injected there that the worker has natively', async () => {
+    // `action` is native in the worker and injected by this library in a page: Clockify's popup read
+    // `browser.action.setIcon` and found `browser.action` undefined (05/11/2026, against Edge, where
+    // browser.action and chrome.action are the same object in both contexts).
+    const view = new WebContentsView({ webPreferences: { session: browser.session } })
+    try {
+      await view.webContents.loadURL(`chrome-extension://${browser.extension.id}/sidepanel.html`)
+      const result = await view.webContents.executeJavaScript(`({
+        action: typeof browser.action,
+        sameAction: browser.action === chrome.action,
+        sameScripting: browser.scripting === chrome.scripting,
+        sameWindows: browser.windows === chrome.windows,
+      })`)
+      expect(result).to.deep.equal({
+        action: 'object',
+        sameAction: true,
+        sameScripting: true,
+        sameWindows: true,
+      })
+    } finally {
+      if (!view.webContents.isDestroyed()) view.webContents.close()
+    }
   })
 
   it('carries the repaired webRequest events too', async () => {

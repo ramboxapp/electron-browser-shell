@@ -7,6 +7,8 @@ import { createRequire } from 'node:module'
 import { AlarmsAPI } from './api/alarms'
 import { BrowserActionAPI } from './api/browser-action'
 import { TabsAPI } from './api/tabs'
+import { TtsAPI } from './api/tts'
+import { WebRequestAPI, AuthRequestDetails, AuthRequestDecision } from './api/web-request'
 import { WindowsAPI } from './api/windows'
 import { WebNavigationAPI } from './api/web-navigation'
 import { ExtensionStore } from './store'
@@ -80,6 +82,7 @@ function resolvePreloadPath(modulePath?: string) {
 }
 
 export type { SidePanelShowDetails, SidePanelHideDetails } from './api/side-panel'
+export type { AuthRequestDetails, AuthRequestDecision } from './api/web-request'
 
 export interface ChromeExtensionOptions extends ChromeExtensionImpl {
   /**
@@ -170,7 +173,9 @@ export class ElectronChromeExtensions extends EventEmitter {
     storage: StorageAPI
     system: SystemAPI
     tabs: TabsAPI
+    tts: TtsAPI
     webNavigation: WebNavigationAPI
+    webRequest: WebRequestAPI
     windows: WindowsAPI
   }
 
@@ -221,7 +226,9 @@ export class ElectronChromeExtensions extends EventEmitter {
       storage: new StorageAPI(this.ctx),
       system: new SystemAPI(this.ctx),
       tabs: new TabsAPI(this.ctx),
+      tts: new TtsAPI(this.ctx),
       webNavigation: new WebNavigationAPI(this.ctx),
+      webRequest: new WebRequestAPI(this.ctx),
       windows: new WindowsAPI(this.ctx),
     }
 
@@ -383,8 +390,44 @@ export class ElectronChromeExtensions extends EventEmitter {
    * delivered event. `_execute_action` is not dispatched: in Chrome it opens the popup, which is the
    * toolbar-click path the host already drives.
    */
-  dispatchCommand(extensionId: string, command: string, tab?: chrome.tabs.Tab) {
-    return this.api.commands.dispatch(extensionId, command, tab)
+  dispatchCommand(
+    extensionId: string,
+    command: string,
+    tab?: chrome.tabs.Tab | Electron.WebContents,
+  ) {
+    const details =
+      tab && typeof (tab as Electron.WebContents).getURL === 'function'
+        ? this.api.tabs.describeTab(tab as Electron.WebContents)
+        : (tab as chrome.tabs.Tab | undefined)
+    return this.api.commands.dispatch(extensionId, command, details)
+  }
+
+  /**
+   * Opens the extension's action popup (or fires `action.onClicked` when it has none) for a tab,
+   * as a click on its toolbar icon would — the `_execute_action` command, which Chrome binds for
+   * the extension when the manifest asks for a shortcut. Anchored at the top right of the tab's
+   * window when the embedder gives no anchor.
+   */
+  openActionPopup(
+    extensionId: string,
+    tab?: Electron.WebContents,
+    anchorRect?: { x: number; y: number; width: number; height: number },
+  ) {
+    return this.api.browserAction.openPopupFor(extensionId, tab, anchorRect)
+  }
+
+  /**
+   * Hands an HTTP authentication challenge (Electron's `login` event) to the extensions listening
+   * for `webRequest.onAuthRequired`, which Electron itself never tells. Call it from the `login`
+   * handler before showing a prompt: resolves the first extension's cancel or credentials, or
+   * `undefined` — at once when no extension listens — to carry on as before.
+   */
+  handleAuthRequest(
+    webContents: Electron.WebContents | null | undefined,
+    request: AuthRequestDetails,
+    authInfo: Electron.AuthInfo,
+  ): Promise<AuthRequestDecision | undefined> {
+    return this.api.webRequest.handleAuthRequest(webContents, request, authInfo)
   }
 
   /**

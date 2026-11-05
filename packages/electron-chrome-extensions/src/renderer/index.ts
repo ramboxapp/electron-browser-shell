@@ -2691,41 +2691,92 @@ export const injectExtensionAPIs = () => {
         }),
       },
 
+      /*
+        chrome.tts, real: the main process speaks through the Web Speech API from a hidden page (see
+        src/browser/api/tts.ts). Each utterance gets an id here, and its events — Chrome delivers
+        them to the `onEvent` of the call, not to a namespace event — come back on
+        `tts.utteranceEvent` and are routed to that callback. `desiredEventTypes` narrows them, as in
+        Chrome. It was a stub with no voices whose `speak` told every utterance it had failed.
+      */
       tts: {
         shouldInject: () => declares('tts'),
-        factory: () => ({
-          getVoices: answering(() => []),
-          isSpeaking: answering(() => false),
-          // There is no voice to speak with. The utterance's own onEvent learns it the way Chrome
-          // tells it about a failed utterance; the call itself succeeds, as Chrome's does.
-          speak: answering((_utterance: unknown, options?: { onEvent?: Function }) => {
-            if (options && typeof options.onEvent === 'function') {
+        factory: () => {
+          type UtteranceHandler = { onEvent: Function; desired?: string[] }
+          const handlers = new Map<string, UtteranceHandler>()
+          const FINAL = ['end', 'error', 'interrupted', 'cancelled']
+          let listening = false
+          const listen = () => {
+            if (listening) return
+            listening = true
+            electron.addExtensionListener(
+              extensionId,
+              'tts.utteranceEvent',
+              (id: string, event: { type: string }) => {
+                const handler = handlers.get(id)
+                if (!handler) return
+                if (FINAL.includes(event.type)) handlers.delete(id)
+                if (handler.desired && !handler.desired.includes(event.type)) return
+                try {
+                  handler.onEvent(event)
+                } catch (error) {
+                  console.error(error)
+                }
+              },
+            )
+          }
+          let nextId = 0
+          const speak = invokeExtension('tts.speak')
+          return {
+            getVoices: invokeExtension('tts.getVoices'),
+            isSpeaking: invokeExtension('tts.isSpeaking'),
+            stop: invokeExtension('tts.stop'),
+            pause: invokeExtension('tts.pause'),
+            resume: invokeExtension('tts.resume'),
+            speak: (utterance: unknown, ...rest: any[]) => {
+              // speak(utterance, options?, callback?): the callback may stand where options go.
+              const callback = typeof rest[rest.length - 1] === 'function' ? rest.pop() : undefined
+              const options: Record<string, any> =
+                rest[0] && typeof rest[0] === 'object' ? { ...rest[0] } : {}
               const onEvent = options.onEvent
-              queueMicrotask(() =>
-                onEvent({ type: 'error', charIndex: 0, errorMessage: 'No voice available.' }),
-              )
-            }
-            return undefined
-          }),
-          stop: noop,
-          pause: noop,
-          resume: noop,
-          onEvent: inert(),
-          onVoicesChanged: inert(),
-          EventType: enumOf(
-            'start',
-            'end',
-            'word',
-            'sentence',
-            'marker',
-            'interrupted',
-            'cancelled',
-            'error',
-            'pause',
-            'resume',
-          ),
-          VoiceGender: enumOf('male', 'female'),
-        }),
+              delete options.onEvent
+              const id = `${Date.now().toString(36)}-${nextId++}`
+              if (typeof onEvent === 'function') {
+                handlers.set(id, {
+                  onEvent,
+                  desired: Array.isArray(options.desiredEventTypes)
+                    ? options.desiredEventTypes.map(String)
+                    : undefined,
+                })
+                listen()
+              }
+              const forget = () => handlers.delete(id)
+              if (callback) {
+                return speak(id, utterance, options, (...args: any[]) => {
+                  if (chrome.runtime.lastError) forget()
+                  callback(...args)
+                })
+              }
+              return (speak(id, utterance, options) as Promise<unknown>).catch((error) => {
+                forget()
+                throw error
+              })
+            },
+            onVoicesChanged: new ExtensionEvent('tts.onVoicesChanged'),
+            EventType: enumOf(
+              'start',
+              'end',
+              'word',
+              'sentence',
+              'marker',
+              'interrupted',
+              'cancelled',
+              'error',
+              'pause',
+              'resume',
+            ),
+            VoiceGender: enumOf('male', 'female'),
+          }
+        },
       },
 
       // A speech engine nobody here will ask to speak: the calls go nowhere, the events never fire.
@@ -3027,6 +3078,162 @@ export const injectExtensionAPIs = () => {
       }
     }
 
+    /*
+      chrome.webRequest.onAuthRequired, which Electron's native webRequest never fires (measured
+      04/11/2026 on 44.9.3+wvcus and 44.10.1+wvcus, with and without this library: a 401 Basic goes
+      to the embedder's `login` event and the extension's listener never runs; Edge runs it). The
+      embedder hands the challenge to the library (ElectronChromeExtensions#handleAuthRequest), which
+      sends it here as `webRequest.onAuthRequired` with an id to answer to. The listener's own
+      `filter` and `extraInfoSpec` are honoured on this side, as the native event would: a
+      'blocking' listener answers by return value, an 'asyncBlocking' one through the callback, an
+      observing one is told and not waited for. Keeper, 1Password, Enpass and NordVPN register it;
+      for the password managers it is how basic auth gets autofilled.
+    */
+    const currentWebRequest = (chrome as any).webRequest
+    if (currentWebRequest && extensionId) {
+      type AuthListener = {
+        callback: Function
+        filter?: { urls?: string[]; types?: string[]; tabId?: number }
+        extra: string[]
+      }
+      const authListeners: AuthListener[] = []
+      const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      // A match pattern as a regular expression over a URL; `<all_urls>` and `*` schemes as Chrome.
+      const patternMatches = (pattern: string, url: string): boolean => {
+        if (pattern === '<all_urls>') return /^(https?|wss?|ftp|file|data):/.test(url)
+        const match = /^(\*|[a-z][a-z0-9+.-]*):\/\/(\*|\*\.[^/*]+|[^/*]*)(\/.*)$/i.exec(pattern)
+        if (!match) return false
+        const [, scheme, host, path] = match
+        const schemeRe = scheme === '*' ? 'https?' : escapeRegExp(scheme.toLowerCase())
+        const hostRe =
+          host === '*'
+            ? '[^/]*'
+            : host.startsWith('*.')
+              ? `([^/]*\\.)?${escapeRegExp(host.slice(2).toLowerCase())}`
+              : escapeRegExp(host.toLowerCase())
+        const pathRe = path.split('*').map(escapeRegExp).join('.*')
+        return new RegExp(`^${schemeRe}://${hostRe}(:\\d+)?${pathRe}$`, 'i').test(url)
+      }
+      const accepts = (listener: AuthListener, details: any) => {
+        const { filter } = listener
+        if (!filter) return true
+        if (Array.isArray(filter.urls) && filter.urls.length) {
+          if (!filter.urls.some((pattern) => patternMatches(String(pattern), details.url))) {
+            return false
+          }
+        }
+        if (Array.isArray(filter.types) && filter.types.length) {
+          if (!filter.types.includes(details.type)) return false
+        }
+        if (typeof filter.tabId === 'number' && filter.tabId !== details.tabId) return false
+        return true
+      }
+      let authListening = false
+      const onAuthRequired = (details: any, authId: string) => {
+        const respond = (() => {
+          let done = false
+          return (response?: unknown) => {
+            if (done) return
+            done = true
+            electron
+              .invokeExtension(extensionId, 'webRequest.authResponse', {}, authId, response)
+              .catch(() => {})
+          }
+        })()
+        const blocking = authListeners.filter(
+          (listener) =>
+            accepts(listener, details) &&
+            (listener.extra.includes('blocking') || listener.extra.includes('asyncBlocking')),
+        )
+        for (const listener of authListeners) {
+          if (!accepts(listener, details) || blocking.includes(listener)) continue
+          try {
+            listener.callback(details)
+          } catch (error) {
+            console.error(error)
+          }
+        }
+        if (blocking.length === 0) return respond(undefined)
+        // The first blocking listener that answers decides, as in Chrome.
+        let index = 0
+        const next = (): void => {
+          const listener = blocking[index++]
+          if (!listener) return respond(undefined)
+          const answered = (response: unknown) => {
+            if (response && typeof response === 'object') respond(response)
+            else next()
+          }
+          try {
+            if (listener.extra.includes('asyncBlocking')) {
+              // Chrome takes the answer either way: through the callback, or as the promise the
+              // listener returns (1Password and Keeper answer with a promise and never call back).
+              const returned: unknown = listener.callback(details, answered)
+              if (returned && typeof (returned as PromiseLike<unknown>).then === 'function') {
+                ;(returned as PromiseLike<unknown>).then(answered, (error: unknown) => {
+                  console.error(error)
+                  next()
+                })
+              }
+            } else {
+              answered(listener.callback(details))
+            }
+          } catch (error) {
+            console.error(error)
+            next()
+          }
+        }
+        next()
+      }
+      const authEvent = {
+        addListener: (callback: Function, filter?: AuthListener['filter'], extra?: unknown) => {
+          if (typeof callback !== 'function') return
+          authListeners.push({
+            callback,
+            filter: filter && typeof filter === 'object' ? filter : undefined,
+            extra: Array.isArray(extra) ? extra.map(String) : [],
+          })
+          if (!authListening) {
+            authListening = true
+            electron.addExtensionListener(extensionId, 'webRequest.onAuthRequired', onAuthRequired)
+          }
+        },
+        removeListener: (callback: Function) => {
+          const index = authListeners.findIndex((listener) => listener.callback === callback)
+          if (index >= 0) authListeners.splice(index, 1)
+          if (authListeners.length === 0 && authListening) {
+            authListening = false
+            electron.removeExtensionListener(
+              extensionId,
+              'webRequest.onAuthRequired',
+              onAuthRequired,
+            )
+          }
+        },
+        hasListener: (callback: Function) =>
+          authListeners.some((listener) => listener.callback === callback),
+        hasListeners: () => authListeners.length > 0,
+        getRules: (...args: any[]) => {
+          const cb = args[args.length - 1]
+          if (typeof cb === 'function') cb([])
+        },
+        addRules: () => {},
+        removeRules: (...args: any[]) => {
+          const cb = args[args.length - 1]
+          if (typeof cb === 'function') cb()
+        },
+      }
+      try {
+        Object.defineProperty(chrome, 'webRequest', {
+          value: { ...currentWebRequest, onAuthRequired: authEvent },
+          enumerable: true,
+          configurable: true,
+        })
+        replacedNamespaces.add('webRequest')
+      } catch (error) {
+        console.error('Failed to wire chrome.webRequest.onAuthRequired', error)
+      }
+    }
+
     // Enable manifest-declared static declarativeNetRequest rulesets. Electron
     // 42's native DNR engine parses and enforces static rulesets but does NOT
     // honor their manifest `"enabled": true` flag at load — leaving them
@@ -3193,9 +3400,16 @@ export const injectExtensionAPIs = () => {
     */
     const browserGlobal = (globalThis as any).browser
     if (browserGlobal && typeof browserGlobal === 'object' && browserGlobal !== chrome) {
-      for (const apiName of replacedNamespaces) {
+      /*
+        Replaced AND injected: a namespace this file adds where Electron had none in this context —
+        `action` in an extension page (native in the worker only), `windows`, the floor — was left
+        off `browser` because only the replaced ones were listed. Clockify's popup reads
+        `browser.action.setIcon` and found `browser.action` undefined (05/11/2026, against Edge).
+      */
+      const mirrored = new Set<string>([...replacedNamespaces, ...Object.keys(allDefinitions)])
+      for (const apiName of mirrored) {
         const injected = (chrome as any)[apiName]
-        if (!injected) continue
+        if (!injected || browserGlobal[apiName] === injected) continue
         try {
           Object.defineProperty(browserGlobal, apiName, {
             value: injected,

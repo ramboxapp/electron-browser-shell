@@ -89,7 +89,8 @@
     "management",
     "gcm",
     "proxy",
-    "sidePanel"
+    "sidePanel",
+    "tts"
   ],
   "optional_permissions": [
     "clipboardRead",

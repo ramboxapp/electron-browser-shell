@@ -144,9 +144,13 @@ describe('the anti-crash floor (absent namespaces)', () => {
       expect(result.withoutNew).to.match(/new/)
     })
 
-    it('answers tts.speak and tells the utterance there was no voice', async () => {
+    it('answers tts.speak and tells the utterance what became of it', async function () {
+      // Real since the tts API got a voice (chrome-tts-spec.ts has the detail): with a speech engine
+      // the utterance starts, without one it fails — either way the call resolves and onEvent runs.
+      this.timeout(15000)
       const result: any = await browser.crx.raw({ type: 'tts-speak' })
-      expect(result.event, 'onEvent never called').to.include({ type: 'error' })
+      expect(result.event, 'onEvent never called').to.be.an('object')
+      expect(['start', 'error']).to.include(result.event.type)
     })
 
     it('fails stub writes through chrome.runtime.lastError / a rejection, with Chrome-like messages', async () => {

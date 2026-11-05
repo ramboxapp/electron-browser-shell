@@ -123,7 +123,14 @@ export class CommandsAPI {
     if (!declared?.some((entry) => entry.name === command)) return false
     if (command === '_execute_action' || command === '_execute_browser_action') return false
     this.ctx.store.noteUserGesture(extensionId)
-    this.ctx.router.sendEvent(extensionId, 'commands.onCommand', command, tab)
+    /*
+      A plain copy of the tab, and no argument at all without one: `ServiceWorkerMain.send` refuses
+      what it cannot serialize ("Failed to serialize arguments", seen in Rambox with the cached tab
+      details), and the event then never reaches the worker while the dispatch reports success.
+    */
+    const args: unknown[] = [command]
+    if (tab) args.push(JSON.parse(JSON.stringify(tab)))
+    this.ctx.router.sendEvent(extensionId, 'commands.onCommand', ...args)
     return true
   }
 }

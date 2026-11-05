@@ -596,6 +596,136 @@ chrome.runtime.onMessage.addListener((message, sender, reply) => {
       break
     }
 
+    /*
+      chrome.tts.speak with the events it delivers to the call's own onEvent, which `outcome`
+      cannot carry (a function). Records until a final event (end, error, interrupted, cancelled)
+      or the deadline, and reports whether speak itself resolved, with what error.
+    */
+    case 'tts-speak': {
+      const events = []
+      let resolved = false
+      let error = null
+      const finish = () => reply({ resolved, error, events })
+      const timer = setTimeout(finish, message.deadline || 8000)
+      const options = Object.assign({}, message.options || {}, {
+        onEvent: (event) => {
+          events.push(event)
+          if (['end', 'error', 'interrupted', 'cancelled'].includes(event.type)) {
+            clearTimeout(timer)
+            // Let a second utterance's events (an interrupt test) land before answering.
+            setTimeout(finish, message.settle || 0)
+          }
+        },
+      })
+      chrome.tts.speak(message.text, options).then(
+        () => (resolved = true),
+        (e) => {
+          error = String((e && e.message) || e)
+          clearTimeout(timer)
+          finish()
+        },
+      )
+      return true
+    }
+
+    /*
+      A webRequest.onAuthRequired listener with the spec and filter the spec asks for, answering
+      what the spec says: `response` as the return value ('blocking'), through the callback
+      ('asyncBlocking', after `delay` ms), or nothing (an observer). What it received is kept for
+      'auth-seen'.
+    */
+    /*
+      A sequence of tts steps run from one RPC, because two RPCs in flight share one reply channel:
+      `speak` (text, options), `wait` (ms), `stop`, `isSpeaking`. Every speak's events are recorded
+      until each reaches a final event or the deadline passes.
+    */
+    case 'tts-sequence': {
+      const FINAL = ['end', 'error', 'interrupted', 'cancelled']
+      const speaks = []
+      const probes = []
+      let deadline
+      const done = () => speaks.every((entry) => entry.error || entry.events.some((e) => FINAL.includes(e.type)))
+      const finish = () => {
+        clearTimeout(deadline)
+        reply({ speaks, probes })
+      }
+      ;(async () => {
+        for (const step of message.steps || []) {
+          if (step.action === 'speak') {
+            const entry = { resolved: false, error: null, events: [] }
+            speaks.push(entry)
+            const options = Object.assign({}, step.options || {}, {
+              onEvent: (event) => {
+                entry.events.push(event)
+                if (FINAL.includes(event.type) && done()) setTimeout(finish, 50)
+              },
+            })
+            chrome.tts.speak(step.text, options).then(
+              () => (entry.resolved = true),
+              (e) => (entry.error = String((e && e.message) || e)),
+            )
+          } else if (step.action === 'wait') {
+            await new Promise((resolve) => setTimeout(resolve, step.ms || 0))
+          } else if (step.action === 'stop') {
+            await chrome.tts.stop()
+          } else if (step.action === 'isSpeaking') {
+            probes.push(await chrome.tts.isSpeaking())
+          }
+        }
+        deadline = setTimeout(finish, message.deadline || 15000)
+        if (done()) setTimeout(finish, 50)
+      })()
+      return true
+    }
+
+    case 'auth-listen': {
+      self.__authSeen = self.__authSeen || []
+      const listener = (details, asyncCallback) => {
+        self.__authSeen.push(JSON.parse(JSON.stringify(details)))
+        // `promise`: answer the way 1Password and Keeper do, by returning a promise and never calling back.
+        if (message.promise) {
+          return new Promise((resolve) => setTimeout(() => resolve(message.response), message.delay || 0))
+        }
+        if (typeof asyncCallback === 'function') {
+          setTimeout(() => asyncCallback(message.response), message.delay || 0)
+          return
+        }
+        return message.response
+      }
+      self.__authListeners = self.__authListeners || []
+      self.__authListeners.push(listener)
+      chrome.webRequest.onAuthRequired.addListener(listener, message.filter || { urls: ['<all_urls>'] }, message.extra || [])
+      reply({ hasListener: chrome.webRequest.onAuthRequired.hasListener(listener) })
+      break
+    }
+
+    case 'auth-seen': {
+      reply(self.__authSeen || [])
+      break
+    }
+
+    case 'auth-forget': {
+      for (const listener of self.__authListeners || []) chrome.webRequest.onAuthRequired.removeListener(listener)
+      self.__authListeners = []
+      self.__authSeen = []
+      reply({ hasListeners: chrome.webRequest.onAuthRequired.hasListeners() })
+      break
+    }
+
+    case 'event-method': {
+      const { name, method, args } = message
+      const path = name.split('.')
+      const event = path.reduce((object, key) => (object ? object[key] : undefined), chrome)
+      try {
+        const result =
+          event && typeof event[method] === 'function' ? event[method](...(args || [])) : undefined
+        reply({ ok: true, result })
+      } catch (e) {
+        reply({ ok: false, error: String((e && e.message) || e) })
+      }
+      break
+    }
+
     case 'recorded': {
       reply((self.__recorded && self.__recorded[message.name]) || null)
       break

@@ -343,6 +343,15 @@ export class ExtensionRouter {
     }
   }
 
+  /** The ids of the extensions with at least one listener for the event, in registration order. */
+  listeningExtensions(eventName: EventName): string[] {
+    const seen: string[] = []
+    for (const listener of this.listeners.get(eventName) || []) {
+      if (!seen.includes(listener.extensionId)) seen.push(listener.extensionId)
+    }
+    return seen
+  }
+
   private getHandler(handlerName: string) {
     const handler = this.handlers.get(handlerName)
     if (!handler) {
