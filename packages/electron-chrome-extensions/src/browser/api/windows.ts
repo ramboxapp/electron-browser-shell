@@ -27,6 +27,7 @@ export class WindowsAPI {
     handle('windows.remove', this.remove.bind(this))
 
     this.ctx.store.on('window-added', this.observeWindow.bind(this))
+    this.ctx.store.on('window-focused', this.onFocusChanged.bind(this))
   }
 
   private observeWindow(window: Electron.BrowserWindow) {

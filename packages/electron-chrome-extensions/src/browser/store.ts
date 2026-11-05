@@ -59,6 +59,15 @@ export class ExtensionStore extends EventEmitter {
   }
 
   /**
+   * Something other than the OS brought a window forward for the extensions: opening an action popup,
+   * which Chrome does on the window the action belongs to even when another one has the focus.
+   * Listened to by the windows API, the one place that moves "last focused" and announces it.
+   */
+  noteWindowFocused(window: Electron.BaseWindow) {
+    this.emit('window-focused', window.id)
+  }
+
+  /**
    * The type a window was created with through `windows.create` (`'popup'` for a popup or a panel,
    * as Chrome reports both). Windows the embedder registers itself are `'normal'`.
    */

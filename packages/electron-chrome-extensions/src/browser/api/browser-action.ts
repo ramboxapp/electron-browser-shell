@@ -409,7 +409,7 @@ export class BrowserActionAPI {
     }
   }
 
-  private getState() {
+  private getState(event: ExtensionEvent) {
     // Get state without icon data.
     const actions = Array.from(this.actionMap.entries()).map(([id, details]) => {
       const { icon, tabs, ...rest } = details
@@ -428,8 +428,8 @@ export class BrowserActionAPI {
       }
     })
 
-    const activeTab = this.ctx.store.getActiveTabOfCurrentWindow()
-    return { activeTabId: activeTab?.id, actions }
+    const sender = event.type === 'frame' ? event.sender : undefined
+    return { activeTabId: this.activeTabFor(sender)?.id, actions }
   }
 
   private activate({ type, sender }: ExtensionEvent, details: ActivateDetails) {
@@ -442,7 +442,7 @@ export class BrowserActionAPI {
 
     switch (eventType) {
       case 'click':
-        this.activateClick(details)
+        this.activateClick(details, sender)
         break
       case 'contextmenu':
         this.activateContextMenu(details)
@@ -452,7 +452,20 @@ export class BrowserActionAPI {
     }
   }
 
-  private activateClick(details: ActivateDetails) {
+  /**
+   * The active tab as a list of action buttons means it: the one of the window the list is in. It used
+   * to be the one of the current window, so with another window last focused the list showed that
+   * tab's badges, the click carried that tab's id, the popup anchored itself to that window and
+   * activeTab went to its tab. The caller that is not in a window falls back to the current one.
+   */
+  private activeTabFor(sender?: Electron.WebContents) {
+    return (
+      (sender && !sender.isDestroyed() && this.ctx.store.getActiveTabFromWebContents(sender)) ||
+      this.ctx.store.getActiveTabOfCurrentWindow()
+    )
+  }
+
+  private activateClick(details: ActivateDetails, sender?: Electron.WebContents) {
     const { extensionId, tabId, anchorRect, alignment } = details
 
     if (this.popup) {
@@ -465,8 +478,7 @@ export class BrowserActionAPI {
       }
     }
 
-    const tab =
-      tabId >= 0 ? this.ctx.store.getTabById(tabId) : this.ctx.store.getActiveTabOfCurrentWindow()
+    const tab = tabId >= 0 ? this.ctx.store.getTabById(tabId) : this.activeTabFor(sender)
     if (!tab) {
       throw new Error(`Unable to get active tab`)
     }
@@ -485,6 +497,11 @@ export class BrowserActionAPI {
       if (!win) {
         throw new Error('Unable to get BrowserWindow from active tab')
       }
+
+      // Edge 156 with the action triggered on an unfocused window: the popup's window becomes the last
+      // focused one, for the popup and the worker, with windows.onFocusChanged. Without a popup, nothing
+      // moves. OS focus normally gets there first; this covers the click that does not bring it along.
+      this.ctx.store.noteWindowFocused(win)
 
       this.popup = new PopupView({
         extensionId,

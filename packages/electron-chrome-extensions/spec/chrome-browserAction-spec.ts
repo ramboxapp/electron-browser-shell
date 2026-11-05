@@ -126,6 +126,28 @@ describe('chrome.browserAction', () => {
       return result[1]
     }
 
+    // Edge 156: with no popup the action only fires onClicked; the last focused window stays put.
+    it('leaves the last focused window alone', async () => {
+      const other = new BrowserWindow({
+        show: false,
+        webPreferences: { session: browser.session, contextIsolation: true },
+      })
+      try {
+        await other.loadURL(server.getUrl())
+        browser.extensions.addTab(other.webContents, other)
+        other.emit('focus')
+
+        const tabPromise = emittedOnce(ipcMain, 'success')
+        await activateExtension(browser.partition, browser.window.webContents, browser.extension)
+        const [, tabDetails] = await tabPromise
+        // The button is in this window, whichever one is last focused.
+        expect(tabDetails.id).to.equal(browser.window.webContents.id)
+        expect((browser.extensions as any).ctx.store.lastFocusedWindowId).to.equal(other.id)
+      } finally {
+        other.destroy()
+      }
+    })
+
     it('still finds the active tab after the focused window loses its only tab', async () => {
       const other = new BrowserWindow({
         show: false,
@@ -174,6 +196,59 @@ describe('chrome.browserAction', () => {
       await activateExtension(browser.partition, browser.window.webContents, browser.extension)
       const [popup] = await popupPromise
       expect(popup.extensionId).to.equal(browser.extension.id)
+    })
+
+    /*
+      Measured in Edge 156 with two windows and Extensions.triggerAction on the unfocused one: opening
+      the popup makes its window the last focused one, for the popup and for the worker alike, and
+      fires windows.onFocusChanged with it. Without this the popup's own `currentWindow` was whichever
+      window had OS focus last: the page an extension had opened at install.
+    */
+    it('makes the window of the popup the last focused one', async () => {
+      const other = new BrowserWindow({
+        show: false,
+        webPreferences: { session: browser.session, contextIsolation: true },
+      })
+      try {
+        await other.loadURL(server.getUrl())
+        browser.extensions.addTab(other.webContents, other)
+        other.emit('focus')
+
+        const router = (browser.extensions as any).ctx.router
+        const broadcast = router.broadcastEvent
+        const focusEvents: number[] = []
+        router.broadcastEvent = function (name: string, ...args: any[]) {
+          if (name === 'windows.onFocusChanged') focusEvents.push(args[0])
+          return broadcast.call(this, name, ...args)
+        }
+
+        // The list in this window draws and clicks this window's active tab, not the focused one's.
+        const state = await browser.window.webContents.executeJavaScript(
+          `browserAction.getState('${browser.partition}')`,
+        )
+        expect(state.activeTabId).to.equal(browser.window.webContents.id)
+
+        const popupPromise = emittedOnce(browser.extensions, 'browser-action-popup-created')
+        await activateExtension(browser.partition, browser.window.webContents, browser.extension)
+        const [popup] = await popupPromise
+        await popup.whenReady()
+        router.broadcastEvent = broadcast
+
+        // The button is in this window, so the popup hangs from it.
+        expect(popup.parent).to.equal(browser.window)
+
+        const seen = await popup.browserWindow.webContents.executeJavaScript(
+          `new Promise((resolve) => chrome.windows.getLastFocused((win) =>
+            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) =>
+              resolve({ lastFocused: win.id, tabs: tabs.map((tab) => tab.id) }))))`,
+          true,
+        )
+        expect(seen.lastFocused).to.equal(browser.window.id)
+        expect(seen.tabs).to.deep.equal([browser.window.webContents.id])
+        expect(focusEvents).to.deep.equal([browser.window.id])
+      } finally {
+        other.destroy()
+      }
     })
 
     it('opens when BrowserView is the active tab', async () => {
@@ -230,9 +305,13 @@ describe('chrome.browserAction', () => {
     })
 
     it("does not open another extension's page or a non-web url from the popup", async () => {
-      const { before } = await openFromPopup('chrome-extension://abcdefghijklmnopabcdefghijklmnop/page.html')
+      const { before } = await openFromPopup(
+        'chrome-extension://abcdefghijklmnopabcdefghijklmnop/page.html',
+      )
       await new Promise((resolve) => setTimeout(resolve, 500))
-      const opened = webContents.getAllWebContents().filter((wc) => !before.has(wc.id) && !wc.isDestroyed())
+      const opened = webContents
+        .getAllWebContents()
+        .filter((wc) => !before.has(wc.id) && !wc.isDestroyed())
       expect(opened.map((wc) => wc.getURL())).to.not.include(
         'chrome-extension://abcdefghijklmnopabcdefghijklmnop/page.html',
       )
