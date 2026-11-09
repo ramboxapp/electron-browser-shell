@@ -9,6 +9,7 @@ export { wakeExtensionServiceWorker } from './browser/patch/service-worker-wake'
 export { applyManifestPublicKey } from './browser/patch/manifest-key-patch'
 export {
   patchExtensionCssMessages,
+  electronSubstitutesCssMessages,
   substituteExtensionIdInCss,
 } from './browser/patch/css-message-patch'
 export {

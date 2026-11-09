@@ -77,6 +77,25 @@ async function collectCssFiles(dir: string, acc: string[]): Promise<void> {
  *
  * @returns whether any file was modified.
  */
+/**
+ * Whether this Electron substitutes `__MSG_@@extension_id__` in extension CSS itself.
+ *
+ * Measured 09/11/2026 with a bare main process (no library), one extension with the token in a
+ * content-script stylesheet and in a stylesheet its own page links: 44.10.1+wvcus substitutes the
+ * content-script one and leaves the page one raw; 45.2.1+wvcus substitutes both. 45.1.0 lists the
+ * fix in its release notes (part of electron/electron#55283, 45 and up only, not 44). From there the
+ * rewrite on disk has nothing left to do; a copy an older version of this library already rewrote
+ * stays as it is, which is equivalent. `css-message-patch-spec.ts` measures the binary it runs on
+ * against this answer. CRX_FORCE_CSS_MESSAGE_PATCH=1 rewrites anyway, for the specs of the rewrite.
+ */
+export const electronSubstitutesCssMessages = (): boolean => {
+  const [major, minor] = String(process.versions?.electron || '')
+    .split('.')
+    .map((part) => parseInt(part, 10))
+  if (!Number.isFinite(major)) return false
+  return major > 45 || (major === 45 && minor >= 1)
+}
+
 export async function patchExtensionCssMessages(
   extensionPath: string,
   extensionId: string,
@@ -97,6 +116,11 @@ async function patchExtensionCssMessagesUnsafe(
   extensionPath: string,
   extensionId: string,
 ): Promise<boolean> {
+  if (process.env.CRX_FORCE_CSS_MESSAGE_PATCH !== '1' && electronSubstitutesCssMessages()) {
+    d(`skipping ${extensionPath}: Electron substitutes ${EXTENSION_ID_TOKEN} in CSS natively`)
+    return false
+  }
+
   const markerPath = path.join(extensionPath, MARKER_FILENAME)
   try {
     await fs.access(markerPath)

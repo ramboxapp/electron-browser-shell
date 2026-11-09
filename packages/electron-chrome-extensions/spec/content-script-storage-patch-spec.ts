@@ -121,6 +121,44 @@ describe('content script storage patch', () => {
       expect(await patchContentScriptStorage(dir)).to.be.false
     })
 
+    it('puts the shim first in every embeddable page, and in no other', async () => {
+      await writeManifest({
+        name: 'pages',
+        version: '1.0',
+        manifest_version: 3,
+        web_accessible_resources: [
+          { resources: ['inline/menu.html', 'images/*', 'glob/*.html', '../outside.html'], matches: ['<all_urls>'] },
+          'legacy.html',
+        ],
+      })
+      await fs.mkdir(path.join(dir, 'inline'))
+      await fs.writeFile(
+        path.join(dir, 'inline', 'menu.html'),
+        '<!doctype html><html><head><title>m</title><script src="menu.js"></script></head><body></body></html>',
+      )
+      await fs.writeFile(path.join(dir, 'legacy.html'), '<body><script src="a.js"></script></body>')
+      await fs.writeFile(path.join(dir, 'popup.html'), '<head></head><script src="p.js"></script>')
+
+      expect(await patchContentScriptStorage(dir)).to.be.true
+      const tag = `<script src="/${CONTENT_SCRIPT_STORAGE_SHIM_FILE}"></script>`
+      const menu = await fs.readFile(path.join(dir, 'inline', 'menu.html'), 'utf-8')
+      expect(menu.indexOf(tag), 'right after <head>, before the page scripts').to.equal(
+        menu.indexOf('<head>') + '<head>'.length,
+      )
+      const legacy = await fs.readFile(path.join(dir, 'legacy.html'), 'utf-8')
+      expect(legacy.indexOf(tag)).to.equal(legacy.indexOf('<body>') + '<body>'.length)
+      // Not web-accessible: no web page can embed it, so the preload always reaches it.
+      expect(await fs.readFile(path.join(dir, 'popup.html'), 'utf-8')).to.not.contain(tag)
+      expect(await fs.readFile(path.join(dir, CONTENT_SCRIPT_STORAGE_SHIM_FILE), 'utf-8')).to.contain(
+        'invokeExtension',
+      )
+
+      // Idempotent: a second run neither reports a change nor adds a second tag.
+      expect(await patchContentScriptStorage(dir)).to.be.false
+      const again = await fs.readFile(path.join(dir, 'inline', 'menu.html'), 'utf-8')
+      expect(again.split(tag).length - 1).to.equal(1)
+    })
+
     it('tolerates a UTF-8 BOM in manifest.json (Chromium does)', async () => {
       await fs.writeFile(
         path.join(dir, 'manifest.json'),
@@ -167,8 +205,10 @@ describe('content script storage patch', () => {
       expect(result.shim, `shim state: ${result.shim}`).to.equal('ok')
       expect(result.local.ok, `local failed: ${result.local.error}`).to.be.true
       expect(result.sync.ok, `sync failed: ${result.sync.error}`).to.be.true
-      // Aliased onto local, like every other context in this library.
+      // Aliased onto local, like every other context in this library: the write to sync is what
+      // local reads back, also on an Electron with a native sync area of its own (45.2+).
       expect(result.sync.value).to.equal('sync')
+      expect(result.localAfterSync.value, 'sync is a store of its own, not the alias').to.equal('sync')
     })
 
     it('gives storage.managed the same empty read-only policy store as every other context', async () => {
@@ -208,13 +248,37 @@ describe('content script storage patch', () => {
     const server = useServer()
     const browser = useExtensionBrowser({ url: server.getUrl, extensionName: 'rpc-mv3' })
 
-    it('storage.sync throws in a content script', async () => {
-      const result: any = await browser.crx.raw({ type: 'content-script-storage' })
-      // The bug this patch exists for. If this ever starts passing, Electron implemented the sync
-      // backend (or started aliasing it) and the patch can go.
-      expect(result.local.ok).to.be.true
-      expect(result.sync.ok, 'storage.sync works natively now — the patch may be unnecessary').to.be
-        .false
-    })
+    /*
+      Electron 45.2.0 added a native storage.sync (electron/electron#55253): a second local area with
+      Chrome's sync quotas. Measured on 45.2.1+wvcus: the call no longer rejects, and the area is a
+      DIFFERENT store from local. The patch stays anyway, and has to: every other context of this
+      library aliases sync onto local, and every install made before 45.2 has its sync data there, so a
+      native area here would show a content script an empty, separate copy of the extension's settings.
+    */
+    const nativeSync = (() => {
+      const [major, minor] = process.versions.electron.split('.').map((n) => parseInt(n, 10))
+      return major > 45 || (major === 45 && minor >= 2)
+    })()
+
+    it(
+      nativeSync
+        ? 'storage.sync is a store of its own in a content script, split from local'
+        : 'storage.sync throws in a content script',
+      async () => {
+        const result: any = await browser.crx.raw({ type: 'content-script-storage' })
+        expect(result.local.ok).to.be.true
+        if (!nativeSync) {
+          // The bug this patch exists for. If this starts passing below 45.2, Electron backported the
+          // sync area and the gate above moves.
+          expect(result.sync.ok, 'storage.sync works natively on this Electron').to.be.false
+          return
+        }
+        expect(result.sync.ok, `native storage.sync failed: ${result.sync.error}`).to.be.true
+        expect(
+          result.localAfterSync.value,
+          'native sync now writes into local: the alias would be redundant',
+        ).to.equal('local')
+      },
+    )
   })
 })

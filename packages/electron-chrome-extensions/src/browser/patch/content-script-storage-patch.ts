@@ -31,6 +31,14 @@ const SHIM_FILE = 'crx_content_script_storage.js'
 const SHIM_SOURCE = `/* electron-chrome-extensions: the APIs a content script is missing here */
 (function () {
   if (typeof chrome === 'undefined' || !chrome.storage) return
+  // In an extension page this file also runs (see patchEmbeddablePages), and there it only has work
+  // to do when this library's preload did not run: an extension page embedded in a web page, which
+  // Electron stopped giving preloads to (43.7, 44.3, 45.0). The preload exposes its bridge as
+  // \`electron\`; where it is present, the preload already defined all of this, and better.
+  if (typeof electron !== 'undefined' && electron && typeof electron.invokeExtension === 'function') {
+    self.__crxStorageShimRan = 'preload'
+    return
+  }
   var local = chrome.storage.local
   if (!local) return
   // Unconditional, and that is the point: Electron DOES define chrome.storage.sync and
@@ -230,7 +238,8 @@ async function patchContentScriptStorageUnsafe(extensionPath: string): Promise<b
   )
 
   const entries: any[] = Array.isArray(manifest.content_scripts) ? manifest.content_scripts : []
-  if (entries.length === 0) return false
+  const pagesChanged = await patchEmbeddablePages(extensionPath, manifest)
+  if (entries.length === 0 && !pagesChanged) return false
 
   let changed = false
   for (const entry of entries) {
@@ -250,11 +259,73 @@ async function patchContentScriptStorageUnsafe(extensionPath: string): Promise<b
   */
   await fs.writeFile(path.join(extensionPath, SHIM_FILE), SHIM_SOURCE, 'utf-8')
 
-  if (!changed) return false
+  if (!changed) return pagesChanged
 
   await fs.writeFile(manifestPath, JSON.stringify(manifest), 'utf-8')
   d(`patched content script storage for ${manifest.name} ${manifest.version}`)
   return true
+}
+
+/** The tag put into an embeddable page. Root-relative, so a page in a subfolder finds the file too. */
+const PAGE_SHIM_TAG = `<script src="/${SHIM_FILE}"></script>`
+
+/**
+ * The extension's pages a web page can put in an iframe: every literal `.html` path in
+ * `web_accessible_resources` (a glob is not expanded; no extension in the catalog lists its in-field
+ * UI by glob). Paths that leave the extension directory are dropped.
+ */
+const embeddablePages = (extensionPath: string, manifest: any): string[] => {
+  const war: any[] = Array.isArray(manifest.web_accessible_resources)
+    ? manifest.web_accessible_resources
+    : []
+  const resources = war.flatMap((entry) =>
+    typeof entry === 'string' ? [entry] : Array.isArray(entry?.resources) ? entry.resources : [],
+  )
+  const root = path.resolve(extensionPath) + path.sep
+  const pages = new Set<string>()
+  for (const resource of resources) {
+    if (typeof resource !== 'string' || !/\.html?$/i.test(resource) || /[*?]/.test(resource))
+      continue
+    const file = path.resolve(extensionPath, resource.replace(/^\/+/, ''))
+    if (file.startsWith(root)) pages.add(file)
+  }
+  return [...pages]
+}
+
+/**
+ * Puts the shim first in every page a web page can embed, which is the in-field UI of every password
+ * manager in the catalog (Keeper's prompt, Bitwarden's notification bar, RoboForm's save dialog...).
+ *
+ * Electron stopped running session frame preloads in a `chrome-extension://` document embedded in an
+ * ordinary page (it now follows `nodeIntegrationInSubFrames`; documented for 45.0 and backported to
+ * 43.7.0, 44.3.0 and 42.11.3). Measured with spec/embedded-extension-frame-spec.ts: the frame gets the
+ * library's surface on 43.0.0 and loses it on 44.9.3+wvcus and 45.2.1+wvcus. What a page script can
+ * put back without the preload's IPC bridge is what the content-script shim already does —
+ * `storage.sync` on `local` (from 45.2 Electron has a native `sync` that is a DIFFERENT store, so the
+ * frame and the worker would read different data), `storage.managed`, and `i18n` in the app's
+ * language. `chrome.windows` and this library's `tabs` need the bridge and stay missing there.
+ *
+ * The tag goes right after `<head>` (or before the first script, or first in the file), so it runs
+ * before the page's own scripts. In a page that did get the preload the shim returns at once.
+ */
+async function patchEmbeddablePages(extensionPath: string, manifest: any): Promise<boolean> {
+  let changed = false
+  for (const file of embeddablePages(extensionPath, manifest)) {
+    let html: string
+    try {
+      html = await fs.readFile(file, 'utf-8')
+    } catch {
+      continue
+    }
+    if (html.includes(SHIM_FILE)) continue
+    const head = /<head(\s[^>]*)?>/i.exec(html)
+    const script = /<script[\s>]/i.exec(html)
+    const at = head ? head.index + head[0].length : script ? script.index : 0
+    await fs.writeFile(file, html.slice(0, at) + PAGE_SHIM_TAG + html.slice(at), 'utf-8')
+    changed = true
+  }
+  if (changed) await fs.writeFile(path.join(extensionPath, SHIM_FILE), SHIM_SOURCE, 'utf-8')
+  return changed
 }
 
 /** Exported for specs: the name of the shim file written into an extension directory. */

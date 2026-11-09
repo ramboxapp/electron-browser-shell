@@ -113,7 +113,11 @@ describe('declarativeNetRequest with an app-level webRequest listener', () => {
     expect(blocked).to.equal('blocked')
   })
 
-  it('displaces the ruleset entirely when it is installed before the extension loads', async () => {
+  it('displaces the ruleset entirely when it is installed before the extension loads', async function () {
+    // waitForRule polls for 8 s when the rule never takes, which is the expected outcome here; with
+    // the extension load on top, the default 10 s timed out in the full run on 45.2.1 (09/11/2026)
+    // while the spec alone passed.
+    this.timeout(30000)
     // Rambox's order: the catch-all listener goes on at web-contents-created, before a profile's
     // extensions are loaded into that session.
     installAppListener()

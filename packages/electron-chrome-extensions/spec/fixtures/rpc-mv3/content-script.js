@@ -56,6 +56,9 @@ async function reportStorage() {
       await chrome.storage.sync.set({ __probe: 'sync' })
       return (await chrome.storage.sync.get('__probe')).__probe
     }),
+    // What local holds once sync wrote last: 'sync' when sync is the alias of local, 'local' when it
+    // is a store of its own (Electron's native sync area, from 45.2).
+    localAfterSync: await attempt(async () => (await chrome.storage.local.get('__probe')).__probe),
     // local and sync both wrote __probe just above, so if this area were aliased onto local the
     // keys below would carry it — which is exactly how the leak would read from a content script.
     managed: await attempt(async () => ({
