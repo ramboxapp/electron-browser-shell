@@ -20,6 +20,10 @@ import { useExtensionBrowser, useServer } from './hooks'
  *
  * A machine without a speech engine (a Linux CI without speech-dispatcher) has no voices; the cases
  * that need one say so and are skipped there rather than asserting a sound nobody can make.
+ *
+ * A machine can also list voices and still be unable to speak: the Windows runners of GitHub Actions
+ * have the SAPI voices but no audio endpoint, so every utterance ends in `error` before `start`.
+ * Chrome does the same there. The cases that need sound probe once and skip on that too.
  */
 describe('chrome.tts', () => {
   const server = useServer()
@@ -37,6 +41,26 @@ describe('chrome.tts', () => {
     }>
 
   const voicesOf = async () => (await outcome('tts.getVoices')).value as any[]
+
+  // Whether this machine can actually speak, probed once: null if it can, the reason if it cannot.
+  let cannotSpeak: Promise<string | null> | undefined
+  const whyCannotSpeak = () =>
+    (cannotSpeak ??= (async () => {
+      if ((await voicesOf()).length === 0) return 'no voices on this machine'
+      const probe = await speak('Probe.', { rate: 2 }, { deadline: 15000 })
+      const failed = probe.events.find((event) => event.type === 'error')
+      if (failed && !probe.events.some((event) => event.type === 'start')) {
+        return `voices are listed but the platform cannot speak (${failed.errorMessage || 'error'})`
+      }
+      return null
+    })())
+  const skipUnlessSpeaks = async (context: Mocha.Context) => {
+    const reason = await whyCannotSpeak()
+    if (reason) {
+      console.log(`    skipped: ${reason}`)
+      context.skip()
+    }
+  }
 
   it('lists the voices of the platform in the shape Chrome does', async function () {
     this.timeout(15000)
@@ -56,7 +80,7 @@ describe('chrome.tts', () => {
 
   it('speaks an utterance: resolves when queued, and the utterance hears start and end', async function () {
     this.timeout(30000)
-    if ((await voicesOf()).length === 0) return this.skip()
+    await skipUnlessSpeaks(this)
     const result = await speak('Hello extensions.', { rate: 2 }, { deadline: 20000 })
     expect(result.error).to.equal(null)
     expect(result.resolved).to.equal(true)
@@ -69,7 +93,7 @@ describe('chrome.tts', () => {
 
   it('interrupts the utterance speaking when a new one is not enqueued, and stop() cancels the rest', async function () {
     this.timeout(40000)
-    if ((await voicesOf()).length === 0) return this.skip()
+    await skipUnlessSpeaks(this)
     const long = 'One two three four five six seven eight nine ten eleven twelve thirteen fourteen.'
     // A long first utterance, interrupted by a second one before it ends.
     const interrupted: any = await browser.crx.raw({
@@ -108,7 +132,7 @@ describe('chrome.tts', () => {
 
   it("delivers only the utterance's desiredEventTypes", async function () {
     this.timeout(30000)
-    if ((await voicesOf()).length === 0) return this.skip()
+    await skipUnlessSpeaks(this)
     const result = await speak(
       'Only the end.',
       { rate: 2, desiredEventTypes: ['end'] },
