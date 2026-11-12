@@ -145,15 +145,54 @@ export class SidePanelAPI {
     return now - own <= GESTURE_LIFESPAN_MS || now - this.sessionInputAt <= GESTURE_LIFESPAN_MS
   }
 
+  /**
+   * Any input in the session counts as the gesture `sidePanel.open()` needs. Listening to
+   * 'input-event' makes Electron forward every input event of the WebContents to the main process —
+   * every mouse move in every app of the partition — so it is only listened to while an extension of
+   * the session declares `sidePanel`, and dropped when the last one goes.
+   */
   private trackInput() {
-    const watch = (wc: Electron.WebContents) => {
-      if (wc.isDestroyed() || wc.session !== this.ctx.session) return
-      wc.on('input-event', (_event, input) => {
-        if (GESTURE_INPUT_TYPES.has(input.type)) this.sessionInputAt = Date.now()
-      })
+    const onInput = (_event: Electron.Event, input: Electron.InputEvent) => {
+      if (GESTURE_INPUT_TYPES.has(input.type)) this.sessionInputAt = Date.now()
     }
-    for (const wc of allWebContents.getAllWebContents()) watch(wc)
-    app.on('web-contents-created', (_event, wc) => watch(wc))
+    const watched = new Set<Electron.WebContents>()
+    const watch = (wc: Electron.WebContents) => {
+      if (wc.isDestroyed() || wc.session !== this.ctx.session || watched.has(wc)) return
+      watched.add(wc)
+      wc.on('input-event', onInput)
+      wc.once('destroyed', () => watched.delete(wc))
+    }
+    const unwatchAll = () => {
+      for (const wc of watched) if (!wc.isDestroyed()) wc.off('input-event', onInput)
+      watched.clear()
+    }
+    const onCreated = (_event: Electron.Event, wc: Electron.WebContents) => watch(wc)
+    let tracking = false
+
+    const sessionExtensions = this.ctx.session.extensions || this.ctx.session
+    const wantsSidePanel = (extension: Electron.Extension) => {
+      const manifest: any = extension.manifest || {}
+      return (
+        (Array.isArray(manifest.permissions) && manifest.permissions.includes('sidePanel')) ||
+        !!manifest.side_panel
+      )
+    }
+    const update = () => {
+      const needed = sessionExtensions.getAllExtensions().some(wantsSidePanel)
+      if (needed === tracking) return
+      tracking = needed
+      if (needed) {
+        for (const wc of allWebContents.getAllWebContents()) watch(wc)
+        app.on('web-contents-created', onCreated)
+      } else {
+        app.off('web-contents-created', onCreated)
+        unwatchAll()
+      }
+    }
+    sessionExtensions.on('extension-loaded', update)
+    // 'extension-unloaded' may fire before the extension leaves getAllExtensions().
+    sessionExtensions.on('extension-unloaded', () => setImmediate(update))
+    update()
   }
 
   // --- options and behavior ------------------------------------------------------------------------

@@ -198,8 +198,9 @@ export class BrowserActionAPI {
       popup.setContentSizeHint(size)
     })
 
-    // browserAction preload API
-    const preloadOpts = { allowRemote: true, extensionContext: false }
+    // browserAction preload API: the embedder's window, never an extension. An extension reaching
+    // these could click any other extension's action (`activate`) or read every action's state.
+    const preloadOpts = { allowRemote: true, extensionContext: false, embedderOnly: true }
     handle('browserAction.getState', this.getState.bind(this), preloadOpts)
     handle('browserAction.activate', this.activate.bind(this), preloadOpts)
     handle(

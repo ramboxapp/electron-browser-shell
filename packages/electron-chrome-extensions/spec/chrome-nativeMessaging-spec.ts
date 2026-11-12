@@ -6,6 +6,8 @@ import * as cp from 'node:child_process'
 import * as path from 'node:path'
 const exec = promisify(cp.exec)
 
+import { WebContentsView } from 'electron'
+
 import { useExtensionBrowser, useServer } from './hooks'
 import { getExtensionId } from './crx-helpers'
 import {
@@ -63,6 +65,31 @@ describe('nativeMessaging host lookup on Windows', () => {
     expect(await windowsManifestPaths('com.vendor.missing', read)).to.deep.equal([])
   })
 })
+
+/** How many test host processes are running right now. */
+const countHostProcesses = async (): Promise<number> => {
+  if (process.platform === 'win32') {
+    const { stdout } = await exec('tasklist /FI "IMAGENAME eq crxtesthost.exe" /NH /FO CSV')
+    return stdout.split(/\r?\n/).filter((line) => line.includes('crxtesthost.exe')).length
+  }
+  try {
+    const { stdout } = await exec('pgrep -x crxtesthost')
+    return stdout.split('\n').filter(Boolean).length
+  } catch {
+    return 0 // pgrep exits 1 when nothing matches
+  }
+}
+
+/** Polls until the host count settles at `expected`, or answers the last count it saw. */
+const waitForHostCount = async (expected: number, timeoutMs = 5000): Promise<number> => {
+  const end = Date.now() + timeoutMs
+  let count = await countHostProcesses()
+  while (count !== expected && Date.now() < end) {
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    count = await countHostProcesses()
+  }
+  return count
+}
 
 // TODO: build crxtesthost on Linux (see script/native-messaging-host/build.js)
 if (process.platform !== 'linux') {
@@ -128,6 +155,64 @@ if (process.platform !== 'linux') {
         const value = { blob: 'x'.repeat(300 * 1024), tail: randomUUID() }
         const result = await browser.crx.exec('runtime.sendNativeMessage', hostApplication, value)
         expect(result).to.deep.equal(value)
+      })
+
+      /*
+        The host answered and the process stayed, one more per call, for the life of the app: a
+        host that does not exit on its own (any real desktop app) piled up behind every
+        sendNativeMessage. Chrome closes it after the response.
+      */
+      it('ends the host process after the response', async function () {
+        this.timeout(20e3)
+        const before = await countHostProcesses()
+        const value = { __stayOpen: true, id: randomUUID() }
+        const result = await browser.crx.exec('runtime.sendNativeMessage', hostApplication, value)
+        expect(result).to.deep.equal(value)
+        expect(await waitForHostCount(before)).to.equal(before)
+      })
+    })
+
+    describe('connectNative()', () => {
+      /*
+        A port belongs to the context that opened it: Chrome closes it, and the host, when the page
+        goes away. Nothing watched the page here, so the process outlived it and a later event sent
+        to the dead WebContents threw in the main process.
+      */
+      it('ends the host process when the page that opened the port closes', async function () {
+        this.timeout(20e3)
+        const before = await countHostProcesses()
+        const view = new WebContentsView({ webPreferences: { session: browser.session } })
+        try {
+          await view.webContents.loadURL(`chrome-extension://${browser.extension.id}/popup.html`)
+          const echoed = await view.webContents.executeJavaScript(`new Promise((resolve) => {
+            const port = chrome.runtime.connectNative('${hostApplication}')
+            window.__port = port
+            port.onMessage.addListener((message) => resolve(message))
+            port.postMessage({ __stayOpen: true, hello: 'port' })
+          })`)
+          expect(echoed).to.deep.equal({ __stayOpen: true, hello: 'port' })
+          expect(await countHostProcesses()).to.equal(before + 1)
+        } finally {
+          view.webContents.close()
+        }
+        expect(await waitForHostCount(before)).to.equal(before)
+      })
+
+      it('ends the host process on disconnect()', async function () {
+        this.timeout(20e3)
+        const before = await countHostProcesses()
+        const view = new WebContentsView({ webPreferences: { session: browser.session } })
+        try {
+          await view.webContents.loadURL(`chrome-extension://${browser.extension.id}/popup.html`)
+          await view.webContents.executeJavaScript(`new Promise((resolve) => {
+            const port = chrome.runtime.connectNative('${hostApplication}')
+            port.onMessage.addListener(() => { port.disconnect(); resolve() })
+            port.postMessage({ __stayOpen: true })
+          })`)
+          expect(await waitForHostCount(before)).to.equal(before)
+        } finally {
+          view.webContents.close()
+        }
       })
     })
   })

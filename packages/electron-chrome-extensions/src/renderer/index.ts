@@ -8,7 +8,12 @@ import {
 } from '../shared/font-settings-schema'
 import { installFileSystemShim } from './filesystem-shim'
 
-export const injectExtensionAPIs = () => {
+/**
+ * @param ownExtensionId The id of the extension this context belongs to, from its own URL. The
+ *   bridge the main world gets ignores any other id it is handed: the router rejects a claim that
+ *   does not match the sender's origin, and the page must not be able to make one.
+ */
+export const injectExtensionAPIs = (ownExtensionId: string) => {
   interface ExtensionMessageOptions {
     noop?: boolean
     defaultResponse?: any
@@ -55,7 +60,7 @@ export const injectExtensionAPIs = () => {
     still popped here for the few internal callers that pass one.
   */
   const invokeExtension = async function (
-    extensionId: string,
+    _claimedExtensionId: string | undefined,
     fnName: string,
     options: ExtensionMessageOptions = {},
     ...args: any[]
@@ -82,7 +87,7 @@ export const injectExtensionAPIs = () => {
     let result
 
     try {
-      result = await ipcRenderer.invoke('crx-msg', extensionId, fnName, ...args)
+      result = await ipcRenderer.invoke('crx-msg', ownExtensionId, fnName, ...args)
     } catch (e) {
       const message = invokeErrorMessage(e)
       if (process.env.NODE_ENV === 'development') {
@@ -104,7 +109,7 @@ export const injectExtensionAPIs = () => {
 
   type ConnectNativeCallback = (connectionId: string, send: (message: any) => void) => void
   const connectNative = (
-    extensionId: string,
+    _claimedExtensionId: string | undefined,
     application: string,
     receive: (message: any) => void,
     disconnect: (reason?: string) => void,
@@ -124,7 +129,7 @@ export const injectExtensionAPIs = () => {
     })
     // A connect the main process refuses (no nativeMessaging permission, say) ends the port the way
     // a host that could not start does: onDisconnect with the refusal as lastError.
-    invokeExtension(extensionId, 'runtime.connectNative', {}, connectionId, application).catch(
+    invokeExtension(ownExtensionId, 'runtime.connectNative', {}, connectionId, application).catch(
       (error: unknown) => {
         ipcRenderer.off(`crx-native-msg-${connectionId}`, onMessage)
         disconnect(invokeErrorMessage(error))
@@ -136,8 +141,8 @@ export const injectExtensionAPIs = () => {
     callback(connectionId, send)
   }
 
-  const disconnectNative = (extensionId: string, connectionId: string) => {
-    invokeExtension(extensionId, 'runtime.disconnectNative', {}, connectionId)
+  const disconnectNative = (_claimedExtensionId: string | undefined, connectionId: string) => {
+    invokeExtension(ownExtensionId, 'runtime.disconnectNative', {}, connectionId)
   }
 
   /*
@@ -189,9 +194,13 @@ export const injectExtensionAPIs = () => {
     Not through invokeExtension on purpose: that one logs every call with its arguments in
     development, and these arguments are the stored values — a password manager's vault state.
   */
-  const reportStorageChanges = (extensionId: string, areaName: string, changes: object) => {
+  const reportStorageChanges = (
+    _claimedExtensionId: string | undefined,
+    areaName: string,
+    changes: object,
+  ) => {
     ipcRenderer
-      .invoke('crx-msg', extensionId, 'storage.reportChanges', areaName, changes)
+      .invoke('crx-msg', ownExtensionId, 'storage.reportChanges', areaName, changes)
       .catch(() => {})
   }
 
@@ -199,8 +208,16 @@ export const injectExtensionAPIs = () => {
     storageChangeRelay: !workerStorageEventsAreNative(),
     reportStorageChanges,
     invokeExtension,
-    addExtensionListener,
-    removeExtensionListener,
+    addExtensionListener: (
+      _claimedExtensionId: string | undefined,
+      name: string,
+      callback: Function,
+    ) => addExtensionListener(ownExtensionId, name, callback),
+    removeExtensionListener: (
+      _claimedExtensionId: string | undefined,
+      name: string,
+      callback: any,
+    ) => removeExtensionListener(ownExtensionId, name, callback),
     hasExtensionListeners,
     connectNative,
     disconnectNative,
@@ -2350,7 +2367,10 @@ export const injectExtensionAPIs = () => {
           const wanted = sourceOf(constraints?.[kind])
           if (wanted) asked.set(wanted.id, wanted.source)
         }
-        const resolved = new Map<string, { chromeMediaSource: string; chromeMediaSourceId: string }>()
+        const resolved = new Map<
+          string,
+          { chromeMediaSource: string; chromeMediaSourceId: string }
+        >()
         for (const [id, source] of asked) {
           const answer = await (resolveStream(id, source) as Promise<any>).catch(() => null)
           if (answer && typeof answer.chromeMediaSourceId === 'string') resolved.set(id, answer)
@@ -3003,7 +3023,12 @@ export const injectExtensionAPIs = () => {
             cancelChooseDesktopMedia: (requestId: number) => {
               pending.delete(requestId)
               electron
-                .invokeExtension(extensionId, 'desktopCapture.cancelChooseDesktopMedia', {}, requestId)
+                .invokeExtension(
+                  extensionId,
+                  'desktopCapture.cancelChooseDesktopMedia',
+                  {},
+                  requestId,
+                )
                 .catch(() => {})
             },
             DesktopCaptureSourceType: enumOf('screen', 'window', 'tab', 'audio'),
@@ -3652,7 +3677,7 @@ export const injectExtensionAPIs = () => {
       if (!root) return
       const size = { width: root.scrollWidth, height: root.scrollHeight }
       ipcRenderer
-        .invoke('crx-msg', location.hostname, 'browserAction.popupContentSize', size)
+        .invoke('crx-msg', ownExtensionId, 'browserAction.popupContentSize', size)
         .catch(() => {})
     }
     if (document.readyState === 'loading') {

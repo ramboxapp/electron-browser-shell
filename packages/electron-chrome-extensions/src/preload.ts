@@ -31,6 +31,10 @@ const contextUrl = (): string => {
 // Rambox on 28/10/2026). Entering on `process.type === 'service-worker'` alone exposed the
 // extension IPC bridge (`electron`) to a site's worker and tried to bolt `chrome.*` onto it, which
 // Chrome never does. A worker's location is its script URL, so one origin check covers both.
-if (contextUrl().startsWith('chrome-extension://')) {
-  injectExtensionAPIs()
+const url = contextUrl()
+const ownExtensionId = /^chrome-extension:\/\/([^/?#]+)/.exec(url)?.[1]
+if (ownExtensionId) {
+  // Every IPC this context sends to the main process names this id, whatever the page passes: the
+  // router checks it against the sender's origin (see getSenderExtensionId in browser/router.ts).
+  injectExtensionAPIs(ownExtensionId)
 }

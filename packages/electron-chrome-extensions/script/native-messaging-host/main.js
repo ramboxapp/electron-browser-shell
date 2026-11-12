@@ -33,5 +33,15 @@ function sendMessage(message) {
   fs.writeSync(1, buffer)
 }
 
-const message = readMessage()
+/*
+  One message, one echo, then exit — what the round-trip specs need. A message carrying
+  `__stayOpen` is echoed and the host keeps reading instead, like a real host (a password manager's
+  desktop app) that never exits on its own: the lifecycle specs use it to see whether the library
+  ends the process itself.
+*/
+let message = readMessage()
 sendMessage(message)
+while (message && typeof message === 'object' && message.__stayOpen) {
+  message = readMessage()
+  sendMessage(message)
+}

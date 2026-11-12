@@ -60,7 +60,17 @@ export class IdleAPI {
   private pollStates = () => {
     const sessionExtensions = this.ctx.session.extensions || this.ctx.session
 
+    // Only the extensions listening for the event: a state nobody hears is not worth a system call
+    // per extension every 15 s. One that starts listening later has no last state, and its first
+    // poll only records it, as before.
+    const listening = new Set(this.ctx.router.listeningExtensions('idle.onStateChanged'))
+    for (const id of Array.from(this.lastStates.keys())) {
+      if (!listening.has(id)) this.lastStates.delete(id)
+    }
+    if (listening.size === 0) return
+
     for (const extension of sessionExtensions.getAllExtensions()) {
+      if (!listening.has(extension.id)) continue
       const interval = this.detectionIntervals.get(extension.id) ?? DEFAULT_DETECTION_INTERVAL
       const state = getIdleState(interval)
       const lastState = this.lastStates.get(extension.id)

@@ -43,6 +43,9 @@ export class WindowsAPI {
 
     window.once('closed', () => {
       this.ctx.store.windowDetailsCache.delete(windowId)
+      // removeWindow() skips a window the store already dropped when its last tab went away, and
+      // with it the type: forget it here, where every window ends.
+      this.ctx.store.windowTypes.delete(windowId)
       this.ctx.store.removeWindow(window)
       this.onRemoved(windowId)
     })

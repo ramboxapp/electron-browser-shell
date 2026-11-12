@@ -39,7 +39,7 @@ const readStartedWorkers = (session: Electron.Session) => {
 }
 
 export class RuntimeAPI extends EventEmitter {
-  private hostMap: Record<string, NativeMessagingHost | undefined> = {}
+  private hostMap = new Map<string, NativeMessagingHost>()
 
   /*
     `runtime.onInstalled`, which Electron never fires.
@@ -77,6 +77,9 @@ export class RuntimeAPI extends EventEmitter {
       this.onExtensionLoaded(extension),
     )
     for (const extension of sessionExtensions.getAllExtensions()) this.onExtensionLoaded(extension)
+    sessionExtensions.on('extension-unloaded', (_event, extension) =>
+      this.closeNativePorts(extension.id),
+    )
   }
 
   // Extensions whose worker Electron had already started in this session before this launch.
@@ -207,13 +210,31 @@ export class RuntimeAPI extends EventEmitter {
       event.sender!,
       connectionId,
       application,
+      true,
+      this.ctx.session,
     )
-    this.hostMap[connectionId] = host
+    // Dropped however the port ends: disconnect, host exit, or the sender going away.
+    host.onClosed = () => {
+      if (this.hostMap.get(connectionId) === host) this.hostMap.delete(connectionId)
+    }
+    this.hostMap.set(connectionId, host)
   }
 
   private disconnectNative = (event: ExtensionEvent, connectionId: string) => {
-    this.hostMap[connectionId]?.destroy()
-    this.hostMap[connectionId] = undefined
+    const host = this.hostMap.get(connectionId)
+    // A port is only its own extension's to close.
+    if (!host || host.extensionId !== event.extension.id) return
+    host.destroy()
+    this.hostMap.delete(connectionId)
+  }
+
+  /** Ends every native port an extension still has open (it was unloaded or reloaded). */
+  private closeNativePorts(extensionId: string) {
+    for (const [connectionId, host] of this.hostMap) {
+      if (host.extensionId !== extensionId) continue
+      this.hostMap.delete(connectionId)
+      host.destroy()
+    }
   }
 
   private sendNativeMessage = async (event: ExtensionEvent, application: string, message: any) => {
@@ -225,8 +246,14 @@ export class RuntimeAPI extends EventEmitter {
       application,
       false,
     )
-    await host.ready
-    return await host.sendAndReceive(message)
+    try {
+      await host.ready
+      return await host.sendAndReceive(message)
+    } finally {
+      // One message, one answer: Chrome closes the host after the response. This left the process
+      // running, one more per call, for the life of the app.
+      host.destroy()
+    }
   }
 
   private openOptionsPage = async ({ extension }: ExtensionEvent) => {

@@ -142,6 +142,29 @@ describe('chrome.webRequest.onAuthRequired', () => {
     expect(details.requestId).to.be.a('string')
   })
 
+  /*
+    An auth id is `<requestId>:<extensionId>` and request ids are sequential: any other extension
+    could answer one and hand a site's login challenge the credentials of its choice.
+  */
+  it('ignores an answer from an extension the challenge was not sent to', async function () {
+    this.timeout(20000)
+    await listen(['asyncBlocking'], { cancel: true }, undefined, 1500)
+    const extensions = ElectronChromeExtensions.fromSession(browser.session)!
+    const webRequest = (extensions as any).api.webRequest
+    const decided = challenge()
+    let authId: string | undefined
+    for (let i = 0; i < 50 && !authId; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      authId = Array.from(webRequest.pending.keys() as Iterable<string>)[0]
+    }
+    expect(authId, 'the challenge never reached the extension').to.be.a('string')
+    webRequest.authResponse({ type: 'frame', extension: { id: 'b'.repeat(32) } }, authId, {
+      authCredentials: { username: 'eve', password: 'intruder' },
+    })
+    expect(await decided).to.deep.equal({ cancel: true })
+    expect(authorizations).to.deep.equal([])
+  })
+
   it('waits for an asyncBlocking listener, and a cancel cancels', async function () {
     this.timeout(20000)
     await listen(['asyncBlocking'], { cancel: true }, undefined, 200)

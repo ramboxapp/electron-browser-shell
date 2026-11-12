@@ -139,6 +139,39 @@ async function readNativeMessagingHostConfig(
     }
   }
 }
+const isSenderGone = (sender: ExtensionSender): boolean => {
+  try {
+    return typeof (sender as any).isDestroyed === 'function' && (sender as any).isDestroyed()
+  } catch {
+    return true
+  }
+}
+
+/**
+ * Calls `onEnd` when the context that opened a port goes away, and returns the unsubscribe. Chrome
+ * closes a native port with its context; without this the host process of a closed page kept
+ * running, holding its pipes, for the life of the app. A page ends with its WebContents; a service
+ * worker when its version stops (ServiceWorkerMain has no 'destroyed' event).
+ */
+function watchSenderEnd(
+  sender: ExtensionSender,
+  session: Electron.Session | undefined,
+  onEnd: () => void,
+): (() => void) | undefined {
+  if (typeof (sender as any).once === 'function' && typeof (sender as any).off === 'function') {
+    const wc = sender as Electron.WebContents
+    wc.once('destroyed', onEnd)
+    return () => wc.off('destroyed', onEnd)
+  }
+  const versionId = (sender as any).versionId
+  if (!session || typeof versionId !== 'number') return undefined
+  const onStatus = (details: any) => {
+    if (details?.versionId === versionId && details?.runningStatus === 'stopped') onEnd()
+  }
+  session.serviceWorkers.on('running-status-changed' as any, onStatus)
+  return () => session.serviceWorkers.off('running-status-changed' as any, onStatus)
+}
+
 export class NativeMessagingHost {
   // Chromium's own wording for each way a native host connection ends (native_message_process_host
   // and the messaging service); extensions match on these strings.
@@ -155,6 +188,14 @@ export class NativeMessagingHost {
   private keepAlive: boolean
   private resolveResponse?: (message: any) => void
   private rejectResponse?: (error: Error) => void
+  private unwatchSender?: () => void
+  private destroyed = false
+
+  /** The extension the connection belongs to. */
+  readonly extensionId: string
+
+  /** Called once, when the connection ends for any reason: the owner drops its reference. */
+  onClosed?: () => void
 
   /** Why the host is gone, in Chrome's words, once it is. */
   failure?: string
@@ -167,14 +208,32 @@ export class NativeMessagingHost {
     connectionId: string,
     application: string,
     keepAlive: boolean = true,
+    session?: Electron.Session,
   ) {
+    this.extensionId = extensionId
     this.keepAlive = keepAlive
     this.sender = sender
+    this.connectionId = connectionId
     if (keepAlive) {
       this.sender.ipc.on(`crx-native-msg-${connectionId}`, this.receiveExtensionMessage)
+      this.unwatchSender = watchSenderEnd(sender, session, () => this.destroy())
     }
-    this.connectionId = connectionId
     this.ready = this.launch(application, extensionId)
+  }
+
+  /**
+   * Sends to the extension context unless it is gone. Sending to a destroyed WebContents throws,
+   * and that throw lands in a child process's 'data' or 'exit' handler: an uncaught exception in
+   * the embedder's main process.
+   */
+  private sendToSender(channel: string, ...args: any[]) {
+    const sender = this.sender
+    if (!sender || isSenderGone(sender)) return
+    try {
+      sender.send(channel, ...args)
+    } catch (error) {
+      d('unable to send %s: %o', channel, error)
+    }
   }
 
   /**
@@ -184,6 +243,8 @@ export class NativeMessagingHost {
    */
   destroy(reason?: string) {
     if (reason && !this.failure) this.failure = reason
+    const firstTime = !this.destroyed
+    this.destroyed = true
     this.connected = false
     if (reason && this.rejectResponse) {
       this.rejectResponse(new Error(reason))
@@ -196,13 +257,18 @@ export class NativeMessagingHost {
     }
     if (this.keepAlive && this.sender) {
       this.sender.ipc.off(`crx-native-msg-${this.connectionId}`, this.receiveExtensionMessage)
-      this.sender.send(`crx-native-msg-${this.connectionId}-disconnect`, reason)
+      this.sendToSender(`crx-native-msg-${this.connectionId}-disconnect`, reason)
     }
+    this.unwatchSender?.()
+    this.unwatchSender = undefined
     this.sender = undefined
+    if (firstTime) this.onClosed?.()
   }
 
   private async launch(application: string, extensionId: string) {
     const config = await readNativeMessagingHostConfig(application)
+    // Disconnected, or its context closed, while the manifest was being looked up.
+    if (this.destroyed) return
     if (!config) {
       d('launch: unable to find %s for %s', application, extensionId)
       this.destroy(NativeMessagingHost.NOT_FOUND)
@@ -228,6 +294,7 @@ export class NativeMessagingHost {
       this.destroy(NativeMessagingHost.FAILED_TO_START)
       return
     }
+    if (this.destroyed) return
 
     d('launch: spawning %s for %s', config.path, extensionId)
     this.process = spawn(config.path, [extensionUrl], {
@@ -333,8 +400,8 @@ export class NativeMessagingHost {
 
   private dispatch(message: any) {
     d('receive: %s', message)
-    if (this.keepAlive && this.sender) {
-      this.sender.send(`crx-native-msg-${this.connectionId}`, message)
+    if (this.keepAlive) {
+      this.sendToSender(`crx-native-msg-${this.connectionId}`, message)
     } else {
       this.resolveResponse?.(message)
       this.resolveResponse = undefined

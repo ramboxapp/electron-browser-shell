@@ -56,8 +56,12 @@ export class WebRequestAPI {
   }
 
   /** The extension's answer to one challenge, through the preload. */
-  private authResponse = (_event: ExtensionEvent, authId: unknown, response: unknown) => {
+  private authResponse = (event: ExtensionEvent, authId: unknown, response: unknown) => {
     if (typeof authId !== 'string') return
+    // An auth id is `<requestId>:<extensionId>` of the extension it was sent to: only that one
+    // answers it. Request ids are sequential, so another extension could otherwise guess one and
+    // hand the credentials of its choice to a site's login challenge.
+    if (!authId.endsWith(`:${event.extension.id}`)) return
     const settle = this.pending.get(authId)
     if (!settle) return
     settle(response && typeof response === 'object' ? (response as AuthResponse) : undefined)

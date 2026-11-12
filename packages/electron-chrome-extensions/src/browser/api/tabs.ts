@@ -4,6 +4,7 @@ import { getAllWindows, matchesPattern, matchesTitlePattern, TabContents } from 
 import { WindowsAPI } from './windows'
 import { rememberFavicon } from './favicon'
 import { wakeExtensionServiceWorker } from '../patch/service-worker-wake'
+import { hostPermissionCovers } from './lib/host-permissions'
 import debug from 'debug'
 
 const d = debug('electron-chrome-extensions:tabs')
@@ -55,6 +56,17 @@ export class TabsAPI {
     // Only reached when Electron's own getZoom/setZoom are missing (see the preload).
     handle('tabs.getZoom', this.getZoom.bind(this))
     handle('tabs.setZoom', this.setZoom.bind(this))
+
+    this.ctx.store.on('invoked', (extensionId: string, tab: Electron.WebContents) =>
+      this.noteInvocation(extensionId, tab),
+    )
+    this.ctx.store.on('tab-removed', (tabId: number) => {
+      for (const tabs of this.invocations.values()) tabs.delete(tabId)
+    })
+    const sessionExtensions = this.ctx.session.extensions || this.ctx.session
+    sessionExtensions.on('extension-unloaded', (_event, extension) =>
+      this.invocations.delete(extension.id),
+    )
 
     this.ctx.store.on('tab-added', this.observeTab.bind(this))
     this.ctx.store.on('active-tab-changed', (tab: Electron.WebContents) =>
@@ -389,6 +401,47 @@ export class TabsAPI {
     return tabDetails
   }
 
+  /** Chrome's words (manifest_constants: kAllURLOrActiveTabNeeded); extensions match on them. */
+  static readonly CAPTURE_NOT_ALLOWED =
+    "Either the '<all_urls>' or 'activeTab' permission is required."
+
+  /** The tabs each extension was invoked on (what grants activeTab), with the origin at the time. */
+  private invocations = new Map<string, Map<number, string>>()
+
+  private noteInvocation(extensionId: string, tab: Electron.WebContents) {
+    if (tab.isDestroyed()) return
+    let tabs = this.invocations.get(extensionId)
+    if (!tabs) this.invocations.set(extensionId, (tabs = new Map()))
+    tabs.set(tab.id, TabsAPI.originOf(tab.getURL()))
+  }
+
+  /* By hand: Node's URL answers "null" as the origin of a chrome-extension:// URL. */
+  private static originOf(url: string) {
+    try {
+      const { protocol, host } = new URL(url)
+      return `${protocol}//${host}`
+    } catch {
+      return ''
+    }
+  }
+
+  /**
+   * Whether the extension may capture what this tab shows: a host permission over the page, or
+   * activeTab granted on the tab by a user action and still on the same origin. This answered for
+   * any extension, so one with no access to a site could screenshot it. (Chrome itself asks for
+   * `<all_urls>` or activeTab; Rambox gives activeTab extensions `<all_urls>`, see
+   * active-tab-patch.)
+   */
+  private mayCapture(extension: Electron.Extension, tab: Electron.WebContents) {
+    const url = tab.getURL()
+    if (url.startsWith(`chrome-extension://${extension.id}/`)) return true
+    if (hostPermissionCovers(extension, url)) return true
+    const manifest: chrome.runtime.Manifest = extension.manifest || {}
+    if (!(manifest.permissions as string[] | undefined)?.includes('activeTab')) return false
+    const origin = this.invocations.get(extension.id)?.get(tab.id)
+    return origin !== undefined && origin === TabsAPI.originOf(url)
+  }
+
   private async captureVisibleTab(event: ExtensionEvent, arg1?: unknown, arg2?: unknown) {
     // The signature is overloaded: captureVisibleTab(windowId?, options?).
     const windowId: number = typeof arg1 === 'number' ? arg1 : TabsAPI.WINDOW_ID_CURRENT
@@ -403,6 +456,7 @@ export class TabsAPI {
 
     const tab = this.ctx.store.getActiveTabFromWindow(win)
     if (!tab) throw new Error('No active tab in window')
+    if (!this.mayCapture(event.extension, tab)) throw new Error(TabsAPI.CAPTURE_NOT_ALLOWED)
 
     const image = await tab.capturePage()
 

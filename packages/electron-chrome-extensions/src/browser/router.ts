@@ -33,6 +33,52 @@ const getHostFromEvent = (event: IpcAnyEvent) => {
 
 const d = debug('electron-chrome-extensions:router')
 
+const EXTENSION_URL = /^chrome-extension:\/\/([^/?#]+)/
+
+/** The extension id of a `chrome-extension://<id>/...` URL or origin, or undefined. */
+export const extensionIdFromUrl = (url: string | undefined | null): string | undefined => {
+  const match = typeof url === 'string' ? EXTENSION_URL.exec(url) : null
+  return match ? match[1] : undefined
+}
+
+/**
+ * The extension an IPC really comes from, read from the sender and never from the message: a
+ * frame's origin (its URL when the origin is opaque, as in an extension's sandboxed page) or a
+ * service worker's scope. Undefined when the sender is not an extension context.
+ *
+ * An about:blank or srcdoc frame inherits its creator's origin, so one an extension page creates
+ * reads as that extension, and one a web page creates (a password manager's inline menu host) as
+ * the web page. The library's preload never enters those frames (it only injects where `location`
+ * is a chrome-extension:// URL), so nothing legitimate arrives from them anyway.
+ */
+export const getSenderExtensionId = (event: IpcAnyEvent): string | undefined => {
+  if (event.type === 'service-worker') {
+    return extensionIdFromUrl((event as any).serviceWorker?.scope)
+  }
+  let frame: Electron.WebFrameMain | null | undefined
+  try {
+    frame = (event as any).senderFrame
+  } catch {
+    // Electron throws reading senderFrame of a frame that navigated or went away.
+    frame = undefined
+  }
+  if (!frame) return undefined
+  return extensionIdFromUrl(frame.origin) || extensionIdFromUrl(frame.url)
+}
+
+/**
+ * Whether the id an IPC claims belongs to its sender. An extension context can only speak for
+ * itself: otherwise extension A, or a compromised renderer of A, calls `cookies.getAll` with the
+ * permissions of B. A claim of no extension at all is checked by the handler (`extensionContext`).
+ */
+const checkSenderClaim = (event: IpcAnyEvent, extensionId: string | undefined) => {
+  const senderId = getSenderExtensionId(event)
+  return { ok: !extensionId || senderId === extensionId, senderId }
+}
+
+const describeSender = (senderId: string | undefined) =>
+  senderId ? `extension ${senderId}` : 'a context that is not an extension'
+
 const DEFAULT_SESSION = '_self'
 
 interface RoutingDelegateObserver {
@@ -103,9 +149,17 @@ class RoutingDelegate {
   ) => {
     d(`received '${handlerName}'`, args)
 
+    const { ok, senderId } = checkSenderClaim(event, extensionId)
+    if (!ok) {
+      throw new Error(
+        `${handlerName} was sent for extension ${extensionId} from ${describeSender(senderId)}`,
+      )
+    }
+
     const observer = this.sessionMap.get(getSessionFromEvent(event))
 
-    return observer?.onExtensionMessage(event, extensionId, handlerName, ...args)
+    // The sender's own id, also when it claimed none: an extension never acts as "no extension".
+    return observer?.onExtensionMessage(event, senderId ?? extensionId, handlerName, ...args)
   }
 
   private onRemoteMessage = async (
@@ -127,6 +181,13 @@ class RoutingDelegate {
   }
 
   private onAddListener = (event: IpcAnyEvent, extensionId: string, eventName: string) => {
+    // An ipcMain.on handler: nothing catches a throw here, so a claim that is not the sender's own
+    // is dropped instead of thrown.
+    const { ok, senderId } = checkSenderClaim(event, extensionId)
+    if (!ok || !senderId) {
+      d(`ignoring '${eventName}' listener for ${extensionId} from ${describeSender(senderId)}`)
+      return
+    }
     const observer = this.sessionMap.get(getSessionFromEvent(event))
     const listener: EventListener =
       event.type === 'frame'
@@ -147,6 +208,13 @@ class RoutingDelegate {
     extensionId: string,
     eventName: string,
   ) => {
+    const { ok, senderId } = checkSenderClaim(event, extensionId)
+    if (!ok || !senderId) {
+      d(
+        `ignoring '${eventName}' listener removal for ${extensionId} from ${describeSender(senderId)}`,
+      )
+      return
+    }
     const observer = this.sessionMap.get(getSessionFromEvent(event))
     const listener: EventListener =
       event.type === 'frame'
@@ -187,6 +255,11 @@ export interface HandlerOptions {
   extensionContext: boolean
   /** Required extension permission to run the handler. */
   permission?: chrome.runtime.ManifestPermissions
+  /**
+   * Only the embedder's own pages may call it (the browser-action preload of its window): refused
+   * from any extension context. `extensionContext: false` only means one is not required.
+   */
+  embedderOnly?: boolean
 }
 
 interface Handler extends HandlerOptions {
@@ -228,7 +301,12 @@ export class ExtensionRouter {
    */
   private extensionHosts: Set<Electron.WebContents> = new Set()
 
-  private extensionWorkers: Set<any> = new Set()
+  /**
+   * Hosts already watched for 'destroyed'. Without it every listener a page registers hung one more
+   * 'destroyed' handler on its WebContents (one per event name, and again after every
+   * remove/add), each filtering the whole listener map when the page closed.
+   */
+  private observedHosts: WeakSet<Electron.WebContents> = new WeakSet()
 
   constructor(
     public session: Electron.Session,
@@ -245,28 +323,15 @@ export class ExtensionRouter {
       if (webContents.session === this.session && webContents.getType() === 'backgroundPage') {
         d(`storing reference to background host [url:'${webContents.getURL()}']`)
         this.extensionHosts.add(webContents)
+        // A reload or an unload destroys the host: keeping it would hold a dead WebContents for
+        // the life of the session.
+        webContents.once('destroyed', () => this.extensionHosts.delete(webContents))
       }
     })
 
-    session.serviceWorkers.on(
-      'running-status-changed' as any,
-      ({ runningStatus, versionId }: any) => {
-        if (runningStatus !== 'starting') return
-
-        const serviceWorker = (session as any).serviceWorkers.getWorkerFromVersionID(versionId)
-        if (!serviceWorker) return
-
-        const { scope } = serviceWorker
-        if (!scope.startsWith('chrome-extension:')) return
-
-        if (this.extensionHosts.has(serviceWorker)) {
-          d('%s running status changed to %s', scope, runningStatus)
-        } else {
-          d(`storing reference to background service worker [url:'${scope}']`)
-          this.extensionWorkers.add(serviceWorker)
-        }
-      },
-    )
+    // There used to be a set of every extension service worker that ever started, "to prevent
+    // them from being terminated". A ServiceWorkerMain reference keeps nothing alive (Chromium
+    // stops an idle worker regardless), so it only grew: removed 11/11/2026.
   }
 
   private filterListeners(predicate: (listener: EventListener) => boolean) {
@@ -287,6 +352,8 @@ export class ExtensionRouter {
   }
 
   private observeListenerHost(host: FrameEventListener['host']) {
+    if (this.observedHosts.has(host)) return
+    this.observedHosts.add(host)
     const hostId = getHostId(host)
     d(`observing listener [id:${hostId}, url:'${getHostUrl(host)}']`)
     host.once('destroyed', () => {
@@ -330,7 +397,9 @@ export class ExtensionRouter {
 
     const eventListeners = listeners.get(eventName)
     if (!eventListeners) {
-      console.error(`event listener not registered for '${eventName}'`)
+      // Routine, not an error: a page removing a listener after its extension was unloaded, or
+      // after a removal for its whole host already ran.
+      d(`event listener not registered for '${eventName}'`)
       return
     }
 
@@ -379,6 +448,10 @@ export class ExtensionRouter {
       throw new Error(`${handlerName} does not support calling from a remote session`)
     }
 
+    if (handler.embedderOnly && getSenderExtensionId(event)) {
+      throw new Error(`${handlerName} cannot be called from an extension`)
+    }
+
     const extension = extensionId ? eventSessionExtensions.getExtension(extensionId) : undefined
     if (!extension && handler.extensionContext) {
       throw new Error(`${handlerName} was sent from an unknown extension context`)
@@ -411,6 +484,7 @@ export class ExtensionRouter {
       extensionContext: typeof opts?.extensionContext === 'boolean' ? opts.extensionContext : true,
       allowRemote: typeof opts?.allowRemote === 'boolean' ? opts.allowRemote : false,
       permission: typeof opts?.permission === 'string' ? opts.permission : undefined,
+      embedderOnly: opts?.embedderOnly === true,
     })
   }
 
@@ -456,8 +530,9 @@ export class ExtensionRouter {
           })
       } else {
         if (listener.host.isDestroyed()) {
-          console.error(`Unable to send '${eventName}' to extension host for ${extensionId}`)
-          return
+          // One closed page must not cost the event to every listener after it in the list.
+          d(`unable to send '${eventName}' to destroyed extension host for ${extensionId}`)
+          continue
         }
         listener.host.send(ipcName, ...args)
       }
