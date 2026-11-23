@@ -116,6 +116,32 @@ describe('content script storage patch', () => {
       expect(shim).to.contain('openOrClosedShadowRoot')
     })
 
+    it('writes nothing when the extension is already patched', async () => {
+      // It runs on every load of every extension into every session: an identical rewrite of the
+      // manifest, a page or the shim would be disk I/O at startup for nothing.
+      await writeManifest({
+        name: 'cs',
+        version: '1.0',
+        manifest_version: 3,
+        content_scripts: [{ matches: ['<all_urls>'], js: ['a.js'] }],
+        web_accessible_resources: [{ resources: ['inline.html'], matches: ['<all_urls>'] }],
+      })
+      await fs.writeFile(path.join(dir, 'inline.html'), '<html><head></head><body></body></html>')
+      expect(await patchContentScriptStorage(dir)).to.be.true
+
+      const files = ['manifest.json', 'inline.html', CONTENT_SCRIPT_STORAGE_SHIM_FILE].map((file) =>
+        path.join(dir, file),
+      )
+      const past = new Date('2020-01-01T00:00:00Z')
+      for (const file of files) await fs.utimes(file, past, past)
+
+      expect(await patchContentScriptStorage(dir)).to.be.false
+      for (const file of files) {
+        const { mtimeMs } = await fs.stat(file)
+        expect(mtimeMs, `${path.basename(file)} was rewritten`).to.equal(past.getTime())
+      }
+    })
+
     it('is a no-op for an extension with no content scripts', async () => {
       await writeManifest({ name: 'cs', version: '1.0', manifest_version: 3 })
       expect(await patchContentScriptStorage(dir)).to.be.false

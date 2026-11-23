@@ -255,9 +255,11 @@ async function patchContentScriptStorageUnsafe(extensionPath: string): Promise<b
     The shim file is written even when the manifest already points at it. A newer version of this
     library ships a newer shim — one that defines APIs the old one did not — and an extension
     patched by an older version would otherwise keep the stale copy for as long as its folder
-    survives, which is to say for ever. Writing it is cheap and idempotent.
+    survives, which is to say for ever. Only when it differs, though: this runs on every load of
+    every extension into every session, and an identical rewrite still costs a write (and, on
+    Windows, a scan of the file) for nothing.
   */
-  await fs.writeFile(path.join(extensionPath, SHIM_FILE), SHIM_SOURCE, 'utf-8')
+  await writeShim(extensionPath)
 
   if (!changed) return pagesChanged
 
@@ -324,8 +326,16 @@ async function patchEmbeddablePages(extensionPath: string, manifest: any): Promi
     await fs.writeFile(file, html.slice(0, at) + PAGE_SHIM_TAG + html.slice(at), 'utf-8')
     changed = true
   }
-  if (changed) await fs.writeFile(path.join(extensionPath, SHIM_FILE), SHIM_SOURCE, 'utf-8')
+  if (changed) await writeShim(extensionPath)
   return changed
+}
+
+/** Writes the shim into the extension's folder unless the copy there is already this one. */
+async function writeShim(extensionPath: string): Promise<void> {
+  const file = path.join(extensionPath, SHIM_FILE)
+  const current = await fs.readFile(file, 'utf-8').catch(() => undefined)
+  if (current === SHIM_SOURCE) return
+  await fs.writeFile(file, SHIM_SOURCE, 'utf-8')
 }
 
 /** Exported for specs: the name of the shim file written into an extension directory. */
